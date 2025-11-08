@@ -13,3 +13,8 @@ sudo apt-get install -y python3.11 python3.11-venv python3.11-dev
 
 # Verify installation
 python3.11 --version
+
+#Install pip
+curl -sS https://bootstrap.pypa.io/get-pip.py -o get-pip.py
+
+sudo python3.11 get-pip.py
