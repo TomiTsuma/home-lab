@@ -2,6 +2,7 @@
 
 curl -fsSL https://code-server.dev/install.sh | sh
 
+USER_NAME=$(whoami)
 
 sudo systemctl enable --now code-server@$USER_NAME
 
@@ -9,7 +10,7 @@ sudo systemctl enable --now code-server@$USER_NAME
 set -e
 
 # Detect current username
-USER_NAME=$(whoami)
+
 
 # Define paths
 CONFIG_DIR="/home/$USER_NAME/.config/code-server"
