@@ -12,6 +12,6 @@ services:
       - TZ=${TZ}
       - PASSWORD=${PASSWORD}
     volumes:
-      - ${USER_HOME}:/home/coder/projects
+      - ${USER_HOME}:/home/${USER_HOME}
     ports:
       - 8443:8443                    # External port to access the web UI
