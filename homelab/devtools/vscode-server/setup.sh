@@ -6,7 +6,7 @@ USER_HOME="/home/${USER_NAME}"
 PUID=$(id -u)
 PGID=$(id -g)
 TZ="Africa/Nairobi"
-PASSWORD="Tobirama13@"
+PASSWORD="yourpassword"
 
 cat > .env <<EOF
 USER_NAME=${USER_NAME}
