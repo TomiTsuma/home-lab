@@ -15,4 +15,3 @@ services:
       - ${USER_HOME}:/home/coder/projects
     ports:
       - 8443:8443                    # External port to access the web UI
-    restart: unless-stopped
