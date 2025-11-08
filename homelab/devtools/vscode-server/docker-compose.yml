@@ -1,0 +1,18 @@
+# Docker Compose for VSCode Server
+version: "3.8"
+
+services:
+  code-server:
+    image: linuxserver/code-server:latest
+    container_name: vscode-server
+    restart: unless-stopped
+    environment:
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - TZ=${TZ}
+      - PASSWORD=${PASSWORD}
+    volumes:
+      - ${USER_HOME}:/home/coder/projects
+    ports:
+      - 8443:8443                    # External port to access the web UI
+    restart: unless-stopped

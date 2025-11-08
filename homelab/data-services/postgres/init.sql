@@ -1,0 +1,1 @@
+-- Initial SQL setup for PostgreSQL
