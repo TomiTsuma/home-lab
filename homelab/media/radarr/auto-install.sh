@@ -1,124 +1,107 @@
 #!/bin/bash
 
-# ==============================================================================
-# Radarr Native Installation Script for Debian/Ubuntu
-# This script adds the official Radarr repository, installs the application,
-# and ensures the service is running and enabled.
-# ==============================================================================
+# Radarr Installation Script
+# This script installs Radarr and sets it up as a systemd service
 
-# --- Configuration ---
-RADARR_USER="radarr"
-RADARR_GROUP="radarr"
-REPOSITORY_URL="https://apt.radarr.tv/debian"
-# Using the direct key URL for a reliable import process
-KEY_URL="https://apt.radarr.tv/debian/radarr.key"
-# Use the official, modern keyrings directory path for APT
-GPG_KEY_FILE="/usr/share/keyrings/radarr-archive-keyring.gpg"
-REPO_SOURCE_FILE="/etc/apt/sources.list.d/radarr.list"
+set -e  # Exit on error
 
-# --- Functions ---
+# Check if running as root
+if [[ $EUID -ne 0 ]]; then
+   echo "This script must be run as root (use sudo)"
+   exit 1
+fi
 
-# Check if the script is run as root
-check_root() {
-    if [ "$EUID" -ne 0 ]; then
-        echo "Please run this script as root or with sudo."
-        exit 1
-    fi
-}
+# Configuration
+RADARR_USER="$SUDO_USER"  # Use the user who ran sudo
+RADARR_DIR="/opt/Radarr"
+RADARR_DATA_DIR="$HOME/.config/Radarr"
+RADARR_VERSION="latest"
 
-# Install necessary prerequisites
-install_prerequisites() {
-    echo "Installing required prerequisites (curl, gnupg, apt-transport-https, install)..."
-    apt update -y
-    # 'install' is part of coreutils, but ensuring it's available via an expected package name
-    apt install -y curl gnupg apt-transport-https 
-    if [ $? -ne 0 ]; then
-        echo "Failed to install prerequisites. Exiting."
-        exit 1
-    fi
-    echo "Prerequisites installed successfully."
-}
+echo "=== Radarr Installation Script ==="
+echo "Installing Radarr to: $RADARR_DIR"
+echo "Data directory: $RADARR_DATA_DIR"
+echo "Running as user: $RADARR_USER"
 
-# Add Radarr GPG key and repository
-setup_repository() {
-    echo "Setting up Radarr repository (using modern keyrings method)..."
+# Update system packages
+echo "Updating system packages..."
+apt-get update
 
-    # 1. Fetch the GPG Key, dearmor it, and securely install it to the keyrings directory
-    echo "1. Fetching GPG key from $KEY_URL and adding to keyrings..."
-    # Using 'install' command to ensure correct permissions and ownership
-    curl -s -L $KEY_URL | gpg --dearmor | install -m 0644 -o root -g root /dev/stdin "$GPG_KEY_FILE"
+# Install required dependencies
+echo "Installing dependencies..."
+apt-get install -y curl sqlite3 libmediainfo0v5
 
-    if [ $? -ne 0 ]; then
-        echo "Error: Failed to fetch or add GPG key. Check the key URL or system GPG setup."
-        exit 1
-    fi
+# Create directories
+echo "Creating directories..."
+mkdir -p "$RADARR_DIR"
+mkdir -p "$RADARR_DATA_DIR"
 
-    # 2. Add the repository source, referencing the key from the new keyrings location
-    echo "2. Adding Radarr repository source to $REPO_SOURCE_FILE..."
-    echo "deb [signed-by=$GPG_KEY_FILE] $REPOSITORY_URL master main" | tee $REPO_SOURCE_FILE > /dev/null
+# Download and extract Radarr
+echo "Downloading Radarr..."
+ARCH=$(dpkg --print-architecture)
+RADARR_URL="https://radarr.servarr.com/v1/update/master/updatefile?os=linux&runtime=netcore&arch=$ARCH"
 
-    if [ $? -ne 0 ]; then
-        echo "Error: Failed to add repository source."
-        exit 1
-    fi
+wget --content-disposition "$RADARR_URL" -O /tmp/Radarr.tar.gz
 
-    echo "Repository setup complete."
-}
+echo "Extracting Radarr..."
+tar -xzf /tmp/Radarr.tar.gz -C "$RADARR_DIR" --strip-components=1
+rm /tmp/Radarr.tar.gz
 
-# Install Radarr package
-install_radarr() {
-    echo "Updating package list and installing Radarr..."
-    apt update -y
-    apt install -y radarr
-    if [ $? -ne 0 ]; then
-        echo "Failed to install radarr package. Exiting."
-        exit 1
-    fi
-    echo "Radarr installed successfully."
-}
+# Set permissions
+echo "Setting permissions..."
+chown -R "$RADARR_USER":"$RADARR_USER" "$RADARR_DIR"
+chown -R "$RADARR_USER":"$RADARR_USER" "$RADARR_DATA_DIR"
+chmod +x "$RADARR_DIR/Radarr"
 
-# Configure and start the service
-configure_and_start_service() {
-    echo "Configuring and starting Radarr service..."
+# Create systemd service file
+echo "Creating systemd service..."
+cat > /etc/systemd/system/radarr.service << EOF
+[Unit]
+Description=Radarr Daemon
+After=network.target
 
-    # Ensure the user/group exists for safety, though the package usually creates it
-    if ! id -u "$RADARR_USER" >/dev/null 2>&1; then
-        useradd -r -s /bin/false -M "$RADARR_USER"
-        echo "Created user $RADARR_USER."
-    fi
+[Service]
+User=$RADARR_USER
+Group=$RADARR_USER
+Type=simple
+ExecStart=$RADARR_DIR/Radarr -nobrowser -data=$RADARR_DATA_DIR
+TimeoutStopSec=20
+KillMode=process
+Restart=on-failure
 
-    # Enable and start the service
-    systemctl enable radarr
-    systemctl start radarr
+[Install]
+WantedBy=multi-user.target
+EOF
 
-    if [ $? -ne 0 ]; then
-        echo "Warning: Failed to start Radarr service. Check logs manually."
-        return
-    fi
+# Reload systemd daemon
+echo "Reloading systemd..."
+systemctl daemon-reload
 
-    echo "Radarr service enabled and started."
-    echo "Verification: Service status (should be 'active (running)'):"
-    systemctl status radarr --no-pager | grep "Active"
-}
+# Enable and start Radarr service
+echo "Enabling and starting Radarr service..."
+systemctl enable radarr
+systemctl start radarr
 
-# Main execution
-main() {
-    check_root
-    echo "--- Starting Radarr Native Installation ---"
+# Wait a moment for the service to start
+sleep 3
 
-    install_prerequisites
-    setup_repository
-    install_radarr
-    configure_and_start_service
-
+# Check service status
+if systemctl is-active --quiet radarr; then
     echo ""
-    echo "=========================================================="
-    echo " Installation Complete!"
-    echo " Radarr is now running and should be accessible at:"
-    echo " http://<YourServerIP>:7878"
+    echo "=== Installation Complete ==="
+    echo "Radarr has been installed and started successfully!"
     echo ""
-    echo " Please make sure to configure firewall access (port 7878) if applicable."
-    echo "=========================================================="
-}
-
-main
+    echo "Access Radarr at: http://localhost:7878"
+    echo ""
+    echo "Useful commands:"
+    echo "  - Check status: sudo systemctl status radarr"
+    echo "  - Stop service: sudo systemctl stop radarr"
+    echo "  - Start service: sudo systemctl start radarr"
+    echo "  - Restart service: sudo systemctl restart radarr"
+    echo "  - View logs: sudo journalctl -u radarr -f"
+else
+    echo ""
+    echo "=== Installation Warning ==="
+    echo "Radarr service failed to start. Check logs with:"
+    echo "sudo journalctl -u radarr -xe"
+    exit 1
+fi
