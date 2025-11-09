@@ -1,5 +1,6 @@
 docker run -d \
+  --name=navidrome \
   -v /mnt/music:/music \
-  -v /mnt/data:/config \
-  -p 4040:4040 \
-  airsonicadvanced/airsonic-advanced
+  -v /mnt/data:/data \
+  -p 4533:4533 \
+  deluan/navidrome:latest
