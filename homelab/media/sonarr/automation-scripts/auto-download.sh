@@ -10,8 +10,10 @@
 SONARR_USER="sonarr"
 SONARR_GROUP="sonarr"
 REPOSITORY_URL="https://apt.sonarr.tv/debian"
-KEY_URL="https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x2199D79E7806507E"
-GPG_KEY_FILE="/etc/apt/trusted.gpg.d/sonarr.gpg"
+# Using the direct key URL for a more reliable import process
+KEY_URL="https://apt.sonarr.tv/debian/sonarr.key" 
+# Use the official, modern keyrings directory path for APT
+GPG_KEY_FILE="/usr/share/keyrings/sonarr-archive-keyring.gpg"
 REPO_SOURCE_FILE="/etc/apt/sources.list.d/sonarr.list"
 
 # --- Functions ---
@@ -26,9 +28,9 @@ check_root() {
 
 # Install necessary prerequisites
 install_prerequisites() {
-    echo "Installing required prerequisites (curl, gnupg, apt-transport-https)..."
+    echo "Installing required prerequisites (curl, gnupg, apt-transport-https, install)..."
     apt update -y
-    apt install -y curl gnupg apt-transport-https
+    apt install -y curl gnupg apt-transport-https install
     if [ $? -ne 0 ]; then
         echo "Failed to install prerequisites. Exiting."
         exit 1
@@ -38,19 +40,18 @@ install_prerequisites() {
 
 # Add Sonarr GPG key and repository
 setup_repository() {
-    echo "Setting up Sonarr repository..."
+    echo "Setting up Sonarr repository (using modern keyrings method)..."
 
-    # 1. Add the GPG Key
-    echo "1. Fetching and adding GPG key..."
-    curl -s -L $KEY_URL | gpg --dearmor | tee $GPG_KEY_FILE > /dev/null
-    chmod 644 $GPG_KEY_FILE
+    # 1. Fetch the GPG Key, dearmor it, and securely install it to the keyrings directory
+    echo "1. Fetching GPG key from $KEY_URL and adding to keyrings..."
+    curl -s -L $KEY_URL | gpg --dearmor | install -m 0644 -o root -g root /dev/stdin "$GPG_KEY_FILE"
 
     if [ $? -ne 0 ]; then
-        echo "Error: Failed to fetch or add GPG key."
+        echo "Error: Failed to fetch or add GPG key. Check the key URL or system GPG setup."
         exit 1
     fi
 
-    # 2. Add the repository source
+    # 2. Add the repository source, referencing the key from the new keyrings location
     echo "2. Adding Sonarr repository source to $REPO_SOURCE_FILE..."
     echo "deb [signed-by=$GPG_KEY_FILE] $REPOSITORY_URL master main" | tee $REPO_SOURCE_FILE > /dev/null
 
