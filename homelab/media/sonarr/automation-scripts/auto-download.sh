@@ -1,47 +1,42 @@
 #!/bin/bash
-# ========================================
-# Sonarr Native Installation Script
-# Runs as current user (no dedicated user)
-# Tested on Ubuntu 20.04+
-# ========================================
+# ======================================================
+# Install Sonarr Natively on Ubuntu (no Docker)
+# Runs as current logged-in user
+# Compatible with Ubuntu 22.04+ (noble, jammy)
+# ======================================================
 
 set -e
 
 CURRENT_USER=$(whoami)
-INSTALL_DIR="/opt/sonarr"
 CONFIG_DIR="/home/$CURRENT_USER/.config/Sonarr"
 
 echo "🚀 Installing Sonarr as user: $CURRENT_USER"
 
-# --- 1️⃣ Update system ---
-echo "🔄 Updating system packages..."
-sudo apt update && sudo apt upgrade -y
+# --- 1️⃣ Update and dependencies ---
+sudo apt update -y
+sudo apt install -y curl mediainfo sqlite3 libchromaprint-tools gnupg apt-transport-https ca-certificates
 
-# --- 2️⃣ Install dependencies ---
-echo "📦 Installing dependencies..."
-sudo apt install -y curl mediainfo sqlite3 libchromaprint-tools gnupg apt-transport-https
+# --- 2️⃣ Check network and DNS ---
+if ! ping -c 1 apt.servarr.com &>/dev/null; then
+  echo "⚠️ DNS resolution for apt.servarr.com failed!"
+  echo "🔧 Trying to use Google DNS temporarily..."
+  echo "nameserver 8.8.8.8" | sudo tee /etc/resolv.conf > /dev/null
+fi
 
-# --- 3️⃣ Add Sonarr repository and install (Debian/Ubuntu method) ---
-echo "🌐 Adding Sonarr repository..."
+# --- 3️⃣ Add Sonarr repository ---
+echo "🌐 Adding Servarr repository..."
 sudo mkdir -p /etc/apt/keyrings
-sudo curl -fsSL https://apt.sonarr.tv/sonarr-release.gpg | sudo gpg --dearmor -o /etc/apt/keyrings/sonarr-release.gpg
+curl -fsSL https://apt.servarr.com/servarr.gpg | sudo gpg --dearmor -o /etc/apt/keyrings/servarr.gpg
 
-echo "deb [signed-by=/etc/apt/keyrings/sonarr-release.gpg] https://apt.sonarr.tv/ubuntu jammy main" | sudo tee /etc/apt/sources.list.d/sonarr.list
+echo "deb [signed-by=/etc/apt/keyrings/servarr.gpg] https://apt.servarr.com/ubuntu noble main" \
+| sudo tee /etc/apt/sources.list.d/servarr.list
 
-echo "🔄 Updating package list..."
-sudo apt update
-
-echo "⬇️ Installing Sonarr..."
+# --- 4️⃣ Install Sonarr ---
+sudo apt update -y
 sudo apt install -y sonarr
 
-# --- 4️⃣ Create installation directory ---
-echo "📁 Setting up Sonarr directory at $INSTALL_DIR..."
-sudo mkdir -p $INSTALL_DIR
-sudo cp -r /usr/lib/sonarr/* $INSTALL_DIR || echo "Sonarr files already copied."
-sudo chown -R $CURRENT_USER:$CURRENT_USER $INSTALL_DIR
-
-# --- 5️⃣ Create systemd service file ---
-echo "⚙️ Creating systemd service for Sonarr..."
+# --- 5️⃣ Create systemd service using current user ---
+echo "⚙️ Creating systemd service..."
 sudo bash -c "cat <<EOF > /etc/systemd/system/sonarr.service
 [Unit]
 Description=Sonarr Daemon
@@ -51,25 +46,21 @@ After=network.target
 User=$CURRENT_USER
 Group=$CURRENT_USER
 Type=simple
-ExecStart=/usr/bin/mono --debug $INSTALL_DIR/Sonarr.exe -nobrowser -data=$CONFIG_DIR
-TimeoutStopSec=20
+ExecStart=/usr/bin/mono --debug /opt/NzbDrone/Sonarr.exe -nobrowser -data=$CONFIG_DIR
 Restart=on-failure
+TimeoutStopSec=20
 
 [Install]
 WantedBy=multi-user.target
 EOF"
 
-# --- 6️⃣ Reload, enable, and start the service ---
-echo "🚦 Enabling and starting Sonarr..."
+# --- 6️⃣ Enable and start service ---
 sudo systemctl daemon-reload
 sudo systemctl enable sonarr
 sudo systemctl start sonarr
 
-# --- 7️⃣ Completion message ---
+# --- 7️⃣ Done ---
 echo ""
-echo "✅ Sonarr installation completed!"
+echo "✅ Sonarr installation completed successfully!"
 echo "📍 Access Sonarr at: http://<your-server-ip>:8989"
-echo "📂 Config directory: $CONFIG_DIR"
-echo "⚙️ Service file: /etc/systemd/system/sonarr.service"
-echo ""
 sudo systemctl status sonarr --no-pager
