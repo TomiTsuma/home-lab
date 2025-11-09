@@ -1,122 +1,75 @@
 #!/bin/bash
+# ========================================
+# Sonarr Native Installation Script
+# Runs as current user (no dedicated user)
+# Tested on Ubuntu 20.04+
+# ========================================
 
-# ==============================================================================
-# Sonarr Native Installation Script for Debian/Ubuntu
-# This script adds the official Sonarr repository, installs the application,
-# and ensures the service is running and enabled.
-# ==============================================================================
+set -e
 
-# --- Configuration ---
-SONARR_USER="sonarr"
-SONARR_GROUP="sonarr"
-REPOSITORY_URL="https://apt.sonarr.tv/debian"
-# Using the direct key URL for a more reliable import process
-KEY_URL="https://apt.sonarr.tv/debian/sonarr.key" 
-# Use the official, modern keyrings directory path for APT
-GPG_KEY_FILE="/usr/share/keyrings/sonarr-archive-keyring.gpg"
-REPO_SOURCE_FILE="/etc/apt/sources.list.d/sonarr.list"
+CURRENT_USER=$(whoami)
+INSTALL_DIR="/opt/sonarr"
+CONFIG_DIR="/home/$CURRENT_USER/.config/Sonarr"
 
-# --- Functions ---
+echo "🚀 Installing Sonarr as user: $CURRENT_USER"
 
-# Check if the script is run as root
-check_root() {
-    if [ "$EUID" -ne 0 ]; then
-        echo "Please run this script as root or with sudo."
-        exit 1
-    fi
-}
+# --- 1️⃣ Update system ---
+echo "🔄 Updating system packages..."
+sudo apt update && sudo apt upgrade -y
 
-# Install necessary prerequisites
-install_prerequisites() {
-    echo "Installing required prerequisites (curl, gnupg, apt-transport-https, install)..."
-    apt update -y
-    apt install -y curl gnupg apt-transport-https install
-    if [ $? -ne 0 ]; then
-        echo "Failed to install prerequisites. Exiting."
-        exit 1
-    fi
-    echo "Prerequisites installed successfully."
-}
+# --- 2️⃣ Install dependencies ---
+echo "📦 Installing dependencies..."
+sudo apt install -y curl mediainfo sqlite3 libchromaprint-tools gnupg apt-transport-https
 
-# Add Sonarr GPG key and repository
-setup_repository() {
-    echo "Setting up Sonarr repository (using modern keyrings method)..."
+# --- 3️⃣ Add Sonarr repository and install (Debian/Ubuntu method) ---
+echo "🌐 Adding Sonarr repository..."
+sudo mkdir -p /etc/apt/keyrings
+sudo curl -fsSL https://apt.sonarr.tv/sonarr-release.gpg | sudo gpg --dearmor -o /etc/apt/keyrings/sonarr-release.gpg
 
-    # 1. Fetch the GPG Key, dearmor it, and securely install it to the keyrings directory
-    echo "1. Fetching GPG key from $KEY_URL and adding to keyrings..."
-    curl -s -L $KEY_URL | gpg --dearmor | install -m 0644 -o root -g root /dev/stdin "$GPG_KEY_FILE"
+echo "deb [signed-by=/etc/apt/keyrings/sonarr-release.gpg] https://apt.sonarr.tv/ubuntu jammy main" | sudo tee /etc/apt/sources.list.d/sonarr.list
 
-    if [ $? -ne 0 ]; then
-        echo "Error: Failed to fetch or add GPG key. Check the key URL or system GPG setup."
-        exit 1
-    fi
+echo "🔄 Updating package list..."
+sudo apt update
 
-    # 2. Add the repository source, referencing the key from the new keyrings location
-    echo "2. Adding Sonarr repository source to $REPO_SOURCE_FILE..."
-    echo "deb [signed-by=$GPG_KEY_FILE] $REPOSITORY_URL master main" | tee $REPO_SOURCE_FILE > /dev/null
+echo "⬇️ Installing Sonarr..."
+sudo apt install -y sonarr
 
-    if [ $? -ne 0 ]; then
-        echo "Error: Failed to add repository source."
-        exit 1
-    fi
+# --- 4️⃣ Create installation directory ---
+echo "📁 Setting up Sonarr directory at $INSTALL_DIR..."
+sudo mkdir -p $INSTALL_DIR
+sudo cp -r /usr/lib/sonarr/* $INSTALL_DIR || echo "Sonarr files already copied."
+sudo chown -R $CURRENT_USER:$CURRENT_USER $INSTALL_DIR
 
-    echo "Repository setup complete."
-}
+# --- 5️⃣ Create systemd service file ---
+echo "⚙️ Creating systemd service for Sonarr..."
+sudo bash -c "cat <<EOF > /etc/systemd/system/sonarr.service
+[Unit]
+Description=Sonarr Daemon
+After=network.target
 
-# Install Sonarr package
-install_sonarr() {
-    echo "Updating package list and installing Sonarr..."
-    apt update -y
-    apt install -y sonarr
-    if [ $? -ne 0 ]; then
-        echo "Failed to install sonarr package. Exiting."
-        exit 1
-    fi
-    echo "Sonarr installed successfully."
-}
+[Service]
+User=$CURRENT_USER
+Group=$CURRENT_USER
+Type=simple
+ExecStart=/usr/bin/mono --debug $INSTALL_DIR/Sonarr.exe -nobrowser -data=$CONFIG_DIR
+TimeoutStopSec=20
+Restart=on-failure
 
-# Configure and start the service
-configure_and_start_service() {
-    echo "Configuring and starting Sonarr service..."
+[Install]
+WantedBy=multi-user.target
+EOF"
 
-    # Ensure the user/group exists for safety, though the package usually creates it
-    if ! id -u "$SONARR_USER" >/dev/null 2>&1; then
-        useradd -r -s /bin/false -M "$SONARR_USER"
-        echo "Created user $SONARR_USER."
-    fi
+# --- 6️⃣ Reload, enable, and start the service ---
+echo "🚦 Enabling and starting Sonarr..."
+sudo systemctl daemon-reload
+sudo systemctl enable sonarr
+sudo systemctl start sonarr
 
-    # Enable and start the service
-    systemctl enable sonarr
-    systemctl start sonarr
-
-    if [ $? -ne 0 ]; then
-        echo "Warning: Failed to start Sonarr service. Check logs manually."
-        return
-    fi
-
-    echo "Sonarr service enabled and started."
-    echo "Verification: Service status (should be 'active (running)'):"
-    systemctl status sonarr --no-pager | grep "Active"
-}
-
-# Main execution
-main() {
-    check_root
-    echo "--- Starting Sonarr Native Installation ---"
-
-    install_prerequisites
-    setup_repository
-    install_sonarr
-    configure_and_start_service
-
-    echo ""
-    echo "=========================================================="
-    echo " Installation Complete!"
-    echo " Sonarr is now running and should be accessible at:"
-    echo " http://<YourServerIP>:8989"
-    echo ""
-    echo " Please make sure to configure firewall access (port 8989) if applicable."
-    echo "=========================================================="
-}
-
-main
+# --- 7️⃣ Completion message ---
+echo ""
+echo "✅ Sonarr installation completed!"
+echo "📍 Access Sonarr at: http://<your-server-ip>:8989"
+echo "📂 Config directory: $CONFIG_DIR"
+echo "⚙️ Service file: /etc/systemd/system/sonarr.service"
+echo ""
+sudo systemctl status sonarr --no-pager
