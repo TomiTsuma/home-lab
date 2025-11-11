@@ -14,7 +14,7 @@ services:
     ports:
       - 8989:8989                      # Web UI port
     restart: unless-stopped
-qbittorrent:
+  qbittorrent:
     image: linuxserver/qbittorrent:latest
     container_name: qbittorrent
     environment:
