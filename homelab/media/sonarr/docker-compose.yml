@@ -30,3 +30,15 @@ services:
       - 6881:6881       # Torrent port
       - 6881:6881/udp
     restart: unless-stopped
+  prowlarr:
+    image: linuxserver/prowlarr:latest
+    container_name: prowlarr
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Africa/Nairobi
+    volumes:
+      - ./prowlarr_config:/config
+    ports:
+      - 9696:9696
+    restart: unless-stopped
