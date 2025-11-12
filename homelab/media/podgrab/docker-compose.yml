@@ -1,0 +1,14 @@
+services:
+  podgrab:
+    image: akhilrex/podgrab:latest
+    container_name: podgrab
+    restart: unless-stopped
+    ports:
+      - "8081:8080"
+    environment:
+      - USERNAME=admin
+      - PASSWORD=changeme
+      - TZ=Etc/UTC
+    volumes:
+      - ~/podgrab/config:/config
+      - ~/podgrab/podcasts:/app/podcasts
