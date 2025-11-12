@@ -9,7 +9,7 @@ services:
       - TZ=Africa/Nairobi
     volumes:
       - ~/readarr/config:/config
-      - ~/downloads:/downloads     # same as qBittorrent download dir
+      - /home/minos/Downloads:/downloads     # same as qBittorrent download dir
       - ~/audiobooks:/books        # final library folder
     ports:
       - 8787:8787
