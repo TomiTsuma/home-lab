@@ -17,7 +17,7 @@ services:
       - ollama
     restart: always
     ports:
-      - "3000:3005"
+      - "3005:3000"
     environment:
       - OLLAMA_HOST=http://ollama:11434
     volumes:
