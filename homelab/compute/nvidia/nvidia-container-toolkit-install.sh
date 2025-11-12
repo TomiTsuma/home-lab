@@ -8,3 +8,6 @@ sudo gpg --export --armor DDCAE044F796ECB0 | sudo tee /etc/apt/trusted.gpg.d/nvi
 sudo apt update
 
 sudo apt install nvidia-container-toolkit
+
+sudo nvidia-ctk runtime configure --runtime=docker
+sudo systemctl restart docker

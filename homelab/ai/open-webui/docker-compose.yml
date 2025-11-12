@@ -34,7 +34,7 @@ services:
       - ollama
     restart: always
     ports:
-      - "8080:8080"
+      - "3005:8080"
     environment:
       # Correct config for container-to-container communication
       - OLLAMA_HOST=http://ollama:11434
