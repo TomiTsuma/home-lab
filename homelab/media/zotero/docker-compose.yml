@@ -9,6 +9,7 @@ services:
       - TZ=Africa/Nairobi # your timezone
       - CUSTOM_USER=admin   # optional basic auth user
       - PASSWORD=mypassword  # optional basic auth pass
+      - DISABLE_HTTPS=true
     volumes:
       - ~/zotero_config:/config
       - ~/papers:/papers
