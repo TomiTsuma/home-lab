@@ -1,7 +1,6 @@
-version: "3.8"
 services:
   readarr:
-    image: lscr.io/linuxserver/readarr:develop
+    image: lscr.io/linuxserver/readarr:latest
     container_name: readarr
     environment:
       - PUID=1000
@@ -9,8 +8,8 @@ services:
       - TZ=Africa/Nairobi
     volumes:
       - ~/readarr/config:/config
-      - /home/minos/Downloads:/downloads     # same as qBittorrent download dir
-      - ~/audiobooks:/books        # final library folder
+      - ~/downloads:/downloads
+      - ~/audiobooks:/books
     ports:
       - 8787:8787
     restart: unless-stopped
