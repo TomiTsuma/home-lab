@@ -7,11 +7,23 @@ services:
     restart: always
     ports:
       - "11434:11434"
-    environment:
-      # Ensure Ollama listens on all interfaces so WebUI can connect
-      - OLLAMA_HOST=0.0.0.0
     volumes:
       - ollama:/root/.ollama
+    # ----------------------------------------------------
+    # FIX 1: Ensure Ollama is listening on all interfaces
+    # so the Open WebUI container can reliably connect.
+    # ----------------------------------------------------
+    environment:
+      - OLLAMA_HOST=0.0.0.0
+    # ----------------------------------------------------
+    # NEW: GPU Configuration (NVIDIA/AMD ROCm)
+    # Requires NVIDIA Container Toolkit or ROCm on host.
+    # ----------------------------------------------------
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: [gpu]
 
   open-webui:
     image: ghcr.io/open-webui/open-webui:main
@@ -20,9 +32,9 @@ services:
       - ollama
     restart: always
     ports:
-      - "3005:8080"
+      - "8080:8080"
     environment:
-      # Use the service name to connect to Ollama from inside Docker network
+      # Correct config for container-to-container communication
       - OLLAMA_HOST=http://ollama:11434
     volumes:
       - open-webui:/app/backend/data
