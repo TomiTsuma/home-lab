@@ -7,6 +7,9 @@ services:
     restart: always
     ports:
       - "11434:11434"
+    environment:
+      # Ensure Ollama listens on all interfaces so WebUI can connect
+      - OLLAMA_HOST=0.0.0.0
     volumes:
       - ollama:/root/.ollama
 
@@ -19,6 +22,7 @@ services:
     ports:
       - "8080:8080"
     environment:
+      # Use the service name to connect to Ollama from inside Docker network
       - OLLAMA_HOST=http://ollama:11434
     volumes:
       - open-webui:/app/backend/data
