@@ -1,0 +1,16 @@
+services:
+  lazylibrarian:
+    image: lscr.io/linuxserver/lazylibrarian:latest
+    container_name: lazylibrarian
+    environment:
+      # Find your PUID and PGID by running 'id <your_user>' in your terminal
+      - PUID=1000
+      - PGID=1000
+      - TZ=Kenya/Nairobi # Change to your timezone (e.g., America/New_York)
+    volumes:
+      - ./config:/config       # For LazyLibrarian settings and database
+      - ./downloads:/downloads # For temporary downloads
+      - ./books:/books         # For your permanent eBook library
+    ports:
+      - 5299:5299 # Host_Port:Container_Port
+    restart: unless-stopped
