@@ -20,7 +20,7 @@ services:
       - ollama
     restart: always
     ports:
-      - "8080:8080"
+      - "3005:8080"
     environment:
       # Use the service name to connect to Ollama from inside Docker network
       - OLLAMA_HOST=http://ollama:11434
