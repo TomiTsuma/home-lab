@@ -1,0 +1,17 @@
+version: '3.8'
+services:
+  zotero:
+    image: lscr.io/linuxserver/zotero:latest
+    container_name: zotero
+    environment:
+      - PUID=1000         # your host user id
+      - PGID=1000         # your host group id
+      - TZ=Africa/Nairobi # your timezone
+      - CUSTOM_USER=admin   # optional basic auth user
+      - PASSWORD=mypassword  # optional basic auth pass
+    volumes:
+      - ~/zotero_config:/config
+      - ~/papers:/papers
+    ports:
+      - 3001:3001
+    restart: unless-stopped
