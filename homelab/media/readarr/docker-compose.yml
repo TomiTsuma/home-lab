@@ -8,8 +8,8 @@ services:
       - TZ=Africa/Nairobi
     volumes:
       - ~/readarr/config:/config
-      - ~/downloads:/downloads
-      - ~/audiobooks:/books
+      - /mnt/nas/data-store/Downloads:/downloads
+      - /mnt/nas/data-store/audiobooks:/books
     ports:
       - 8787:8787
     restart: unless-stopped
