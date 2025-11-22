@@ -9,8 +9,8 @@ services:
       - TZ=Africa/Nairobi  # Your timezone
     volumes:
       - ./config:/config               # Config folder
-      - /mnt/nas/data-store/tvseries:/tv          # TV shows directory
-      - /mnt/nas/data-store/downloads:/downloads  # Downloads directory
+      - /home/minos/tvseries:/tv          # TV shows directory
+      - /home/minos/Downloads:/downloads  # Downloads directory
     ports:
       - 8989:8989                      # Web UI port
     restart: unless-stopped
