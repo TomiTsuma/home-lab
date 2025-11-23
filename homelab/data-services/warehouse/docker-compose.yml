@@ -1,0 +1,50 @@
+version: "3.9"
+services:
+  ###############################
+  # ClickHouse – Data Warehouse
+  ###############################
+  clickhouse:
+    image: clickhouse/clickhouse-server:latest
+    container_name: clickhouse
+    ports:
+      - "8123:8123" # HTTP interface
+      - "9004:9004" # Native protocol
+    environment:
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse/
+      - clickhouse_logs:/var/log/clickhouse-server/
+    restart: unless-stopped
+
+  ###############################
+  # Trino – SQL MPP Compute Layer
+  ###############################
+  trino:
+    image: trinodb/trino:latest
+    container_name: trino
+    depends_on:
+      - clickhouse
+    ports:
+      - "8081:8081" # Trino Web UI
+    volumes:
+      - ./trino/catalog:/etc/trino/catalog
+    restart: unless-stopped
+
+  ###############################
+  # Metabase – BI Dashboard
+  ###############################
+  metabase:
+    image: metabase/metabase:latest
+    container_name: metabase
+    ports:
+      - "3002:3002"
+    depends_on:
+      - trino
+      - clickhouse
+    environment:
+      MB_DB_FILE: /metabase.db
+    restart: unless-stopped
+
+volumes:
+  clickhouse_data:
+  clickhouse_logs:

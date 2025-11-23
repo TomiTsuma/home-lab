@@ -1,18 +1,18 @@
 version: "2.1"
 services:
   readarr:
-    image: lscr.io/linuxserver/readarr:nightly
+    image: linuxserver/readarr:latest
     container_name: readarr
     environment:
-      - PUID=1000
-      - PGID=1000
-      - TZ=Africa/Nairobi
+      - PUID=1000          # Your user ID
+      - PGID=1000          # Your group ID
+      - TZ=Africa/Nairobi  # Your timezone
     volumes:
-      - ~/readarr/config:/config
-      - /mnt/nas/data-store/Downloads:/downloads
-      - /mnt/nas/data-store/audiobooks:/books
+      - ./config:/config               # Config folder
+      - /home/minos/audiobooks:/tv          # TV shows directory
+      - /home/minos/Downloads:/downloads  # Downloads directory
     ports:
-      - 8787:8787
+      - 8989:8989                      # Web UI port
     restart: unless-stopped
 
 
