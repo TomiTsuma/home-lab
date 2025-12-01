@@ -1,0 +1,14 @@
+version: "3.9"
+
+services:
+  kavita:
+    image: jvmilazz0/kavita:latest
+    container_name: kavita
+    restart: unless-stopped
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./config:/kavita/config
+      - ./data:/books
+    environment:
+      - TZ=Africa/Nairobi
