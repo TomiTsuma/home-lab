@@ -1,1 +1,55 @@
-# Docker Compose for Superset
+version: "3.9"
+
+services:
+  superset-db:
+    image: postgres:15
+    container_name: superset-db
+    environment:
+      POSTGRES_USER: aeacus
+      POSTGRES_PASSWORD: Tobirama13@
+      POSTGRES_DB: superset
+    volumes:
+      - superset_db:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  superset-redis:
+    image: redis:7
+    container_name: superset-redis
+    restart: unless-stopped
+
+  superset:
+    image: apache/superset:latest
+    container_name: superset
+    depends_on:
+      - superset-db
+      - superset-redis
+    environment:
+      SUPERSET_SECRET_KEY: "change_this_secret"
+      DATABASE_DB: superset
+      DATABASE_HOST: aeacus
+      DATABASE_PASSWORD: Tobirama13@
+      DATABASE_USER: aeacus
+      DATABASE_PORT: 5432
+      REDIS_HOST: superset-redis
+      REDIS_PORT: 6379
+    ports:
+      - "8088:8088"
+    volumes:
+      - superset_home:/app/superset_home
+    command: >
+      /bin/bash -c "
+      superset db upgrade &&
+      superset fab create-admin
+        --username aeacus
+        --firstname aeacus
+        --lastname aeacus
+        --email tommytsuma7@gmail.com
+        --password Tobirama13@ &&
+      superset init &&
+      superset run -h 0.0.0.0 -p 8088
+      "
+    restart: unless-stopped
+
+volumes:
+  superset_db:
+  superset_home:
