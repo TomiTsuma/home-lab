@@ -37,17 +37,7 @@ services:
     volumes:
       - superset_home:/app/superset_home
     command: >
-      /bin/bash -c "
-      superset db upgrade &&
-      superset fab create-admin
-        --username aeacus
-        --firstname aeacus
-        --lastname aeacus
-        --email tommytsuma7@gmail.com
-        --password Tobirama13@ &&
-      superset init &&
-      superset run -h 0.0.0.0 -p 8088
-      "
+      /bin/bash -c "superset db upgrade && superset fab create-admin --username aeacus --firstname aeacus --lastname aeacus --email tommytsuma7@gmail.com --password Tobirama13@ && superset init && superset run -h 0.0.0.0 -p 8088"
     restart: unless-stopped
 
 volumes:
