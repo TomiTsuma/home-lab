@@ -5,6 +5,10 @@ services:
     ports:
       - "8123:8123"   # HTTP
       - "9005:9000"   # Native client
+    environment:
+      CLICKHOUSE_USER: admin
+      CLICKHOUSE_PASSWORD: strongpassword
+      CLICKHOUSE_DB: default
     volumes:
       - ./data/clickhouse:/var/lib/clickhouse
       - ./clickhouse-config:/etc/clickhouse-server/config.d
