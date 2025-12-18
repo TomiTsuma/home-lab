@@ -1,82 +1,90 @@
 #!/usr/bin/env bash
 set -e
 
-VAULT_DIR="/opt/vault"
-VAULT_CONFIG="$VAULT_DIR/config"
-VAULT_DATA="$VAULT_DIR/data"
-SERVICE_FILE="/etc/systemd/system/vault.service"
-VAULT_IMAGE="hashicorp/vault:latest"
+VAULT_VERSION="1.15.6"
+VAULT_USER="vault"
+VAULT_GROUP="vault"
 
-echo "▶ Checking Docker..."
-if ! command -v docker &>/dev/null; then
-  echo "▶ Docker not found. Installing..."
-  curl -fsSL https://get.docker.com | sh
-  systemctl enable docker
-  systemctl start docker
+VAULT_BIN="/usr/local/bin/vault"
+VAULT_CONFIG_DIR="/etc/vault"
+VAULT_DATA_DIR="/var/lib/vault"
+VAULT_LOG_DIR="/var/log/vault"
+VAULT_SERVICE="/etc/systemd/system/vault.service"
+
+echo "▶ Installing dependencies..."
+apt-get update -y
+apt-get install -y curl unzip ca-certificates
+
+echo "▶ Downloading Vault ${VAULT_VERSION}..."
+cd /tmp
+curl -fsSL https://releases.hashicorp.com/vault/${VAULT_VERSION}/vault_${VAULT_VERSION}_linux_amd64.zip -o vault.zip
+unzip -o vault.zip
+mv vault ${VAULT_BIN}
+chmod +x ${VAULT_BIN}
+
+echo "▶ Creating vault user..."
+if ! id "${VAULT_USER}" &>/dev/null; then
+  useradd --system --home ${VAULT_DATA_DIR} --shell /bin/false ${VAULT_USER}
 fi
 
-echo "▶ Creating Vault directories..."
-mkdir -p "$VAULT_CONFIG" "$VAULT_DATA"
-chmod -R 777 "$VAULT_DIR"
+echo "▶ Creating directories..."
+mkdir -p ${VAULT_CONFIG_DIR} ${VAULT_DATA_DIR} ${VAULT_LOG_DIR}
+chown -R ${VAULT_USER}:${VAULT_GROUP} \
+  ${VAULT_CONFIG_DIR} \
+  ${VAULT_DATA_DIR} \
+  ${VAULT_LOG_DIR}
+chmod 750 ${VAULT_CONFIG_DIR} ${VAULT_DATA_DIR}
 
-echo "▶ Writing Vault config..."
-cat <<EOF > "$VAULT_CONFIG/vault.hcl"
+echo "▶ Writing Vault configuration..."
+cat <<EOF > ${VAULT_CONFIG_DIR}/vault.hcl
 storage "file" {
-  path = "/vault/data"
+  path = "${VAULT_DATA_DIR}"
 }
 
 listener "tcp" {
-  address     = "0.0.0.0:8200"
+  address     = "127.0.0.1:8200"
   tls_disable = 1
 }
 
 ui = true
-disable_mlock = true
+disable_mlock = false
 EOF
 
-echo "▶ Writing systemd service..."
-cat <<EOF > "$SERVICE_FILE"
-[Unit]
-Description=HashiCorp Vault (Docker)
-After=network-online.target docker.service
-Requires=docker.service
+chown ${VAULT_USER}:${VAULT_GROUP} ${VAULT_CONFIG_DIR}/vault.hcl
+chmod 640 ${VAULT_CONFIG_DIR}/vault.hcl
 
-/usr/bin/docker run --rm \
-  --name vault \
-  --cap-add=IPC_LOCK \
-  -p 8200:8200 \
-  -v /opt/vault/config:/vault/config \
-  -v /opt/vault/data:/vault/data \
-  hashicorp/vault:latest server -config=/vault/config/vault.hcl
+echo "▶ Writing systemd service..."
+cat <<EOF > ${VAULT_SERVICE}
+[Unit]
+Description=HashiCorp Vault
+Documentation=https://www.vaultproject.io/docs
+After=network-online.target
+Requires=network-online.target
 
 [Service]
-Restart=always
+User=${VAULT_USER}
+Group=${VAULT_GROUP}
+ExecStart=${VAULT_BIN} server -config=${VAULT_CONFIG_DIR}/vault.hcl
+ExecReload=/bin/kill --signal HUP \$MAINPID
+Restart=on-failure
 RestartSec=5
-ExecStart= sudo /usr/bin/docker run --rm \
-  --name vault \
-  --cap-add=IPC_LOCK \
-  -p 8200:8200 \
-  -v $VAULT_CONFIG:/vault/config \
-  -v $VAULT_DATA:/vault/data \
-  $VAULT_IMAGE server -config=/vault/config/vault.hcl
-
-ExecStop=/usr/bin/docker stop vault
-TimeoutStopSec=30
+LimitNOFILE=65536
+CapabilityBoundingSet=CAP_IPC_LOCK
+AmbientCapabilities=CAP_IPC_LOCK
+NoNewPrivileges=true
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-echo "▶ Reloading systemd..."
+echo "▶ Enabling and starting Vault..."
 systemctl daemon-reexec
 systemctl daemon-reload
-
-echo "▶ Enabling Vault service..."
 systemctl enable vault
-
-echo "▶ Starting Vault..."
 systemctl start vault
 
-echo "✔ Vault is now running as a Docker-backed systemd service"
-echo "➡ Check status with: systemctl status vault"
-echo "➡ Access Vault at: http://localhost:8200"
+echo "✔ Vault installation complete"
+echo "➡ Status: systemctl status vault"
+echo "➡ Initialize with:"
+echo "   export VAULT_ADDR=http://127.0.0.1:8200"
+echo "   vault operator init"
