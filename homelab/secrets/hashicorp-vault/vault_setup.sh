@@ -41,10 +41,18 @@ Description=HashiCorp Vault (Docker)
 After=network-online.target docker.service
 Requires=docker.service
 
+/usr/bin/docker run --rm \
+  --name vault \
+  --cap-add=IPC_LOCK \
+  -p 8200:8200 \
+  -v /opt/vault/config:/vault/config \
+  -v /opt/vault/data:/vault/data \
+  hashicorp/vault:latest server -config=/vault/config/vault.hcl
+
 [Service]
 Restart=always
 RestartSec=5
-ExecStart=/usr/bin/docker run --rm \
+ExecStart= sudo /usr/bin/docker run --rm \
   --name vault \
   --cap-add=IPC_LOCK \
   -p 8200:8200 \
