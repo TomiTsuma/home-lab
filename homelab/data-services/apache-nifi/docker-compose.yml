@@ -11,6 +11,8 @@ services:
       NIFI_WEB_HTTPS_PORT: 8443
       NIFI_WEB_HTTPS_HOST: 0.0.0.0
 
+      NIFI_WEB_PROXY_HOST: 192.168.1.158:8443
+
       # --- Single-user auth (dev / internal use) ---
       SINGLE_USER_CREDENTIALS_USERNAME: admin
       SINGLE_USER_CREDENTIALS_PASSWORD: 123456789123
