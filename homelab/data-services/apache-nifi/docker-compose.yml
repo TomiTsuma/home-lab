@@ -19,9 +19,4 @@ services:
       NIFI_JVM_HEAP_INIT: 2g
       NIFI_JVM_HEAP_MAX: 2g
 
-    volumes:
-      - nifi_conf:/opt/nifi/nifi-current/conf
-      - nifi_state:/opt/nifi/nifi-current/state
-      - nifi_logs:/opt/nifi/nifi-current/logs
-
     restart: unless-stopped
