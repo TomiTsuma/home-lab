@@ -1,0 +1,10 @@
+version: "3.9"
+
+services:
+  nifi:
+    image: apache/nifi:1.25.0
+    ports:
+      - "8443:8443"
+    environment:
+      SINGLE_USER_CREDENTIALS_USERNAME: admin
+      SINGLE_USER_CREDENTIALS_PASSWORD: admin123
