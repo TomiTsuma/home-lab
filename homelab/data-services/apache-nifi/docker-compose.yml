@@ -5,19 +5,33 @@ services:
     image: apache/nifi:1.25.0
     container_name: nifi
     ports:
+      - "8080:8080"
       - "8443:8443"
+
     environment:
-      # --- Web / Host configuration ---
+      # -------------------------------------------------
+      # ENABLE BOTH HTTP AND HTTPS
+      # -------------------------------------------------
+      NIFI_WEB_HTTP_PORT: 8080
+      NIFI_WEB_HTTP_HOST: 0.0.0.0
+
       NIFI_WEB_HTTPS_PORT: 8443
       NIFI_WEB_HTTPS_HOST: 0.0.0.0
 
-      NIFI_WEB_PROXY_HOST: 192.168.1.158:8443
+      # Proxy hosts (VERY IMPORTANT)
+      NIFI_WEB_PROXY_HOST: >
+        192.168.1.158:8080,
+        192.168.1.158:8443
 
-      # --- Single-user auth (dev / internal use) ---
+      # -------------------------------------------------
+      # SINGLE USER AUTH (HTTPS ONLY)
+      # -------------------------------------------------
       SINGLE_USER_CREDENTIALS_USERNAME: admin
       SINGLE_USER_CREDENTIALS_PASSWORD: 123456789123
 
-      # --- JVM tuning (optional but recommended) ---
+      # -------------------------------------------------
+      # JVM
+      # -------------------------------------------------
       NIFI_JVM_HEAP_INIT: 2g
       NIFI_JVM_HEAP_MAX: 2g
 
