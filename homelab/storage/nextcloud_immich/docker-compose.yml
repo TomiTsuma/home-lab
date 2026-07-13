@@ -11,7 +11,8 @@ services:
     env_file:
       - .env
     ports:
-      - "2283:2283"
+      # 0.0.0.0 = reachable on every interface (localhost, LAN, Tailscale)
+      - "0.0.0.0:2283:2283"
     depends_on:
       - immich-redis
       - immich-database
@@ -54,7 +55,7 @@ services:
     container_name: nextcloud_app
     image: nextcloud:31-apache
     ports:
-      - "8080:80"
+      - "0.0.0.0:8080:80"
     volumes:
       - ${NEXTCLOUD_DATA_LOCATION}:/var/www/html
     environment:
@@ -63,8 +64,9 @@ services:
       MYSQL_USER: nextcloud
       MYSQL_PASSWORD: ${NEXTCLOUD_DB_PASSWORD}
       REDIS_HOST: nextcloud-redis
-      # Allow access via the Tailscale hostname (set in .env)
-      NEXTCLOUD_TRUSTED_DOMAINS: ${TAILSCALE_HOSTNAME} localhost
+      # Space-separated list of hosts Nextcloud will answer on (set in .env).
+      # NOTE: only applied on FIRST install — see occ command in comments below.
+      NEXTCLOUD_TRUSTED_DOMAINS: ${TRUSTED_DOMAINS}
     depends_on:
       - nextcloud-db
       - nextcloud-redis
