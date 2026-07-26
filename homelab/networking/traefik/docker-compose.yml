@@ -1,3 +1,4 @@
+# traefik.yml (docker-compose)
 version: "3.9"
 
 services:
@@ -11,3 +12,9 @@ services:
       - "80:80"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - traefik
+
+networks:
+  traefik:
+    external: true

@@ -151,7 +151,7 @@ sudo mount -t cifs //<truenas-ip>/<sharename> /mnt/nas \
 Example:
 
 ```bash
-sudo mount -t cifs //192.168.1.168/storage /mnt/nas -o username=aeacus,vers=3.0
+sudo mount -t cifs //192.168.1.141/storage /mnt/nas -o username=aeacus,vers=3.0
 ```
 
 ---

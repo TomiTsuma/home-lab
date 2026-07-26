@@ -12,3 +12,4 @@ services:
     volumes:
       - ./data/clickhouse:/var/lib/clickhouse
       - ./clickhouse-config:/etc/clickhouse-server/config.d
+  
