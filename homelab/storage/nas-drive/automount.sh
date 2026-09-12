@@ -8,7 +8,7 @@
 set -euo pipefail
 
 # ---------------------------------------------------------------- configuration
-SERVER="//192.168.1.141/storage"
+SERVER="//192.168.100.10/storage"
 MOUNTPOINT="/mnt/nas"
 CIFS_USER="aeacus"
 SMB_VERS="3.0"
