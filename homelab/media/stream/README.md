@@ -1,9 +1,18 @@
 # Live sports streaming stack
 
-All paths in this stack are relative to this directory. Before starting it, copy
-`.env.example` to `.env`, set `SPORTSDB_API_KEY`, and replace
-`PROXY_ALLOWED_HOSTS` with the exact hostnames of streams you are authorized to
-access. Separate multiple hostnames with commas; wildcards are not supported.
+Runtime data and Compose configuration are relative to this directory. The
+build contexts point to `../DVarr_Source` and `../FruidDeepLinks_Source`, which
+should remain alongside `stream/` in the `media/` folder.
+
+Before starting, copy `.env.example` to `.env`, set unique `DVARR_AUTH_USER`
+and `DVARR_AUTH_PASS` credentials, and replace `PROXY_ALLOWED_HOSTS` with the
+exact hostnames of streams you are authorized to access. Separate multiple
+hostnames with commas; wildcards are not supported. `DVARR_TSDB_API_KEY` is
+optional and can also be configured in DVarr's settings.
+
+Set `FRUIT_SERVER_URL` to the URL clients should use to reach FruitDeepLinks.
+For VPN access, use the server's reachable Tailscale or WireGuard IP and the
+configured `FRUIT_HOST_PORT`.
 
 Start the services from this directory:
 
@@ -21,4 +30,6 @@ upstream access controls. HLS playlists are rewritten so their relative
 segments and key/map URIs continue through the same restricted proxy.
 
 Configuration/state directories for the aggregator and DVR are stored in
-`FruitDeepLinks/config` and `DVarr/config`.
+`FruitDeepLinks/data`, `FruitDeepLinks/out`, `FruitDeepLinks/logs`, and
+`DVarr/config`, `DVarr/media`, `DVarr/segments`. The actual applications build
+from their local source repositories rather than external image tags.

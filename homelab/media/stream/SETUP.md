@@ -1,8 +1,9 @@
 # Homelab Live Sports Streaming Stack
 
-This stack keeps its compose file, proxy, and persistent configuration paths
-inside this `stream/` directory. It combines the FruitDeepLinks aggregator,
-DVarr schedule/DVR service, a restricted HLS proxy, and the `nba-go` CLI.
+This stack keeps its compose file, proxy, and persistent application data
+inside this `stream/` directory. It builds FruitDeepLinks and DVarr from the
+local source repositories in the parent `media/` directory, and includes a
+restricted HLS proxy and the `nba-go` CLI.
 
 ## Files and directories
 
@@ -11,25 +12,37 @@ stream/
 ├── .env.example
 ├── docker-compose.yml
 ├── DVarr/
-│   └── config/
+│   ├── config/
+│   ├── media/
+│   └── segments/
 ├── FruitDeepLinks/
-│   └── config/
+│   ├── data/
+│   ├── logs/
+│   └── out/
 └── proxy/
     ├── Dockerfile
     ├── hls_proxy.py
     └── requirements.txt
 ```
 
-The two `config/` directories are mounted into their respective containers so
-their state survives container replacement.
+Compose builds from `../DVarr_Source` and `../FruidDeepLinks_Source`. Keep those
+repositories alongside `stream/` under `media/`. DVarr's database/config,
+recordings, and temporary segments, plus FruitDeepLinks' database, exports,
+and logs, are mounted from directories under `stream/` so they survive
+container replacement.
 
 ## Configure and start
 
 1. Copy `.env.example` to `.env`.
-2. Set `SPORTSDB_API_KEY` and replace `PROXY_ALLOWED_HOSTS` with the exact
-   hostnames of streams you are authorized to access. Use comma-separated
-   hostnames for multiple providers; do not use wildcards.
-3. From this directory, build and start the services:
+2. Set `DVARR_AUTH_USER` and `DVARR_AUTH_PASS` to non-default credentials.
+   `DVARR_TSDB_API_KEY` is optional; without it, add a TheSportsDB key in
+   DVarr's settings.
+3. Replace `PROXY_ALLOWED_HOSTS` with the exact hostnames of streams you are
+   authorized to access. Use comma-separated hostnames for multiple providers;
+   do not use wildcards.
+4. Set `FRUIT_SERVER_URL` to an address reachable by the clients using its M3U
+   links. For VPN clients, this can be the server's Tailscale or WireGuard IP.
+5. From this directory, build and start the services:
 
    ```sh
    docker compose up -d --build
@@ -38,6 +51,10 @@ their state survives container replacement.
 The published ports bind to localhost by default. To permit access from other
 devices on your LAN, change `STREAM_BIND_IP` to `0.0.0.0` in `.env`, then
 restart the stack. Do not expose the services directly to the public internet.
+
+The local source Dockerfiles expose FruitDeepLinks on container port `6655` and
+DVarr on `1867`. Compose publishes them on host ports `8080` and `8686`,
+respectively, by default.
 
 ## Proxy behavior
 

@@ -1,31 +1,47 @@
 services:
   fruitdeeplinks:
-    image: kineticman/fruitdeeplinks:latest
-    container_name: sports_aggregator
+    build:
+      context: ../FruidDeepLinks_Source
+      dockerfile: Dockerfile
+    image: fruitdeeplinks:local
+    container_name: fruitdeeplinks
     restart: unless-stopped
     networks:
       - sports-net
     ports:
-      - "${STREAM_BIND_IP:-127.0.0.1}:8080:8080"
+      - "${STREAM_BIND_IP:-127.0.0.1}:${FRUIT_HOST_PORT:-30080}:6655"
     volumes:
-      - ./FruitDeepLinks/config:/app/config
+      - ./FruitDeepLinks/data:/app/data
+      - ./FruitDeepLinks/out:/app/out
+      - ./FruitDeepLinks/logs:/app/logs
     environment:
       TZ: ${TZ:-Asia/Kuala_Lumpur}
-      UPDATE_INTERVAL: ${UPDATE_INTERVAL:-300}
+      SERVER_URL: ${FRUIT_SERVER_URL:-http://localhost:30080}
+      FRUIT_HOST_PORT: ${FRUIT_HOST_PORT:-30080 }
+      FRUIT_DB_PATH: /app/data/fruit_events.db
+      OUT_DIR: /app/out
+      LOG_DIR: /app/logs
 
   dvarr:
-    image: haydenw22/dvarr:latest
-    container_name: sports_dvr
+    build:
+      context: ../DVarr_Source
+      dockerfile: Dockerfile
+    image: dvarr:local
+    container_name: dvarr
     restart: unless-stopped
     networks:
       - sports-net
     ports:
-      - "${STREAM_BIND_IP:-127.0.0.1}:8686:8686"
+      - "${STREAM_BIND_IP:-127.0.0.1}:8686:1867"
     volumes:
       - ./DVarr/config:/config
+      - ./DVarr/media:/media
+      - ./DVarr/segments:/segments
     environment:
       TZ: ${TZ:-Asia/Kuala_Lumpur}
-      SPORTSDB_API_KEY: ${SPORTSDB_API_KEY:?Set SPORTSDB_API_KEY in stream/.env}
+      DVARR_AUTH_USER: ${DVARR_AUTH_USER:?Set DVARR_AUTH_USER in stream/.env}
+      DVARR_AUTH_PASS: ${DVARR_AUTH_PASS:?Set DVARR_AUTH_PASS in stream/.env}
+      DVARR_TSDB_API_KEY: ${DVARR_TSDB_API_KEY:-}
 
   stream-proxy:
     build: ./proxy
