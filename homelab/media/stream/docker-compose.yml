@@ -1,0 +1,51 @@
+services:
+  fruitdeeplinks:
+    image: kineticman/fruitdeeplinks:latest
+    container_name: sports_aggregator
+    restart: unless-stopped
+    networks:
+      - sports-net
+    ports:
+      - "${STREAM_BIND_IP:-127.0.0.1}:8080:8080"
+    volumes:
+      - ./FruitDeepLinks/config:/app/config
+    environment:
+      TZ: ${TZ:-Asia/Kuala_Lumpur}
+      UPDATE_INTERVAL: ${UPDATE_INTERVAL:-300}
+
+  dvarr:
+    image: haydenw22/dvarr:latest
+    container_name: sports_dvr
+    restart: unless-stopped
+    networks:
+      - sports-net
+    ports:
+      - "${STREAM_BIND_IP:-127.0.0.1}:8686:8686"
+    volumes:
+      - ./DVarr/config:/config
+    environment:
+      TZ: ${TZ:-Asia/Kuala_Lumpur}
+      SPORTSDB_API_KEY: ${SPORTSDB_API_KEY:?Set SPORTSDB_API_KEY in stream/.env}
+
+  stream-proxy:
+    build: ./proxy
+    container_name: stream_header_proxy
+    restart: unless-stopped
+    networks:
+      - sports-net
+    ports:
+      - "${STREAM_BIND_IP:-127.0.0.1}:5050:5050"
+    environment:
+      PROXY_ALLOWED_HOSTS: ${PROXY_ALLOWED_HOSTS:?Set PROXY_ALLOWED_HOSTS in stream/.env}
+
+  nba-go:
+    image: node:18-alpine
+    container_name: nba_cli_dashboard
+    entrypoint: ["sh", "-c", "npm install -g nba-go && tail -f /dev/null"]
+    networks:
+      - sports-net
+    restart: unless-stopped
+
+networks:
+  sports-net:
+    driver: bridge
