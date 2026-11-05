@@ -1,10 +1,10 @@
 # TrueNAS cron scripts
 
-Live copies pulled from `/mnt/storage-tank/data-store/scripts/` on TrueNAS
-(2026-11-05). All three run as root via TrueNAS cron jobs (System > Advanced >
-Cron Jobs in the UI) pointed at this exact path — after a rebuild, copy these
-files back to `/mnt/storage-tank/data-store/scripts/` and recreate the 3 cron
-jobs listed in `../README.md` section 6.
+Live copies pulled from `/mnt/storage-tank/data-store/scripts/` on TrueNAS.
+All four run as root via TrueNAS cron jobs (System > Advanced > Cron Jobs in
+the UI) pointed at this exact path — after a rebuild, copy these files back
+to `/mnt/storage-tank/data-store/scripts/` and recreate the 4 cron jobs
+listed in `../README.md` section 6.
 
 ## `backup_to_backup_tank.py`
 
@@ -70,6 +70,40 @@ Usage: `remux_to_mp4.py` (dry run, prints the plan) or
 the live cron uses `--apply --max-minutes 360`).
 
 Full incident writeup: `../../../docs/changelog/171026-103353_jellyfin_11850_and_storage_fixes_changelog.md`.
+
+## `gitea_repos_to_s3.py`
+
+Added 2026-11-05. Mirrors Gitea's bare git repositories
+(`/mnt/.ix-apps/app_mounts/gitea/data/git`) to the `gitea-backup` bucket on
+the MinIO instance on `aeacus-data-handler` — an independent, off-TrueNAS
+copy alongside the local storage-tank → backup-tank replication that
+`backup_to_backup_tank.py` already does (Part A covers all of
+`storage-tank/ix-apps`, including Gitea's full app data, but that copy lives
+on a disk in the same Proxmox host/VM chain).
+
+- **Uses the LAN IP of `aeacus-data-handler` (`192.168.100.9:9000`), not the
+  public `s3.ereuna.org` domain** — deliberately, so this runs entirely over
+  the local network rather than round-tripping through the internet/
+  Cloudflare tunnel. Update `S3_ENDPOINT` in the script if that host's LAN
+  IP ever changes.
+- Upload is additive-only (never deletes from S3) and skip-if-size-matches
+  (re-run safe, only uploads new/changed files).
+- **Credentials gotcha**: `storage-tank/data-store` has NFSv4
+  `aclmode=restricted`, so plain `chmod` fails on this dataset (confirmed
+  while deploying this script) — permissions must be set via
+  `midclt filesystem.setacl` instead. The credentials file
+  (`.gitea_s3_credentials.json`, next to this script) was locked to
+  `0700`/owner-only this way; root (running via cron) can still read it
+  since root bypasses permission checks.
+- **Known compromise**: currently uses MinIO's **root** credentials — a
+  properly scoped, bucket-limited access key couldn't be created because
+  MinIO discontinued free public downloads of its `mc` admin client
+  (`dl.min.io` returns `410 Gone`). Rotate to a scoped key when that's
+  sorted out (MinIO's Admin API can be called directly with a hand-signed
+  request as a workaround, or via a locally-built `mc`), and update
+  `.gitea_s3_credentials.json` to match.
+- Runs daily at 14:30 TrueNAS local time (same minute as `remux_to_mp4.py`
+  — harmless, independent processes, no shared resources).
 
 ## `nextcloud_to_paperless.py` + `test_nextcloud_to_paperless.py`
 

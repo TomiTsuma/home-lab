@@ -67,6 +67,15 @@ services:
   glitchtip:
     image: glitchtip/glitchtip:latest
     container_name: lyre_glitchtip
+    # aeacus-data-handler only has 2 CPU cores and runs ~29 containers
+    # (this app + the whole Ereuna/Harbor platform) with essentially no
+    # headroom (load average regularly 3+ on a 2-core box). The embedded
+    # worker below is a real, continuous additional CPU consumer on that
+    # box — capped so it can never meaningfully compete with Lyre's own
+    # audio streaming again (added 2026-11-05 after a backlog-processing
+    # burst coincided with reported playback lag).
+    cpus: 0.5
+    mem_limit: 512m
     ports:
       - "8085:8000"
     environment:

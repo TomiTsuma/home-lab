@@ -125,7 +125,7 @@ from a secrets backup if preserving existing peers matters).
 
 ## 6. Cron jobs
 
-All three run from `/mnt/storage-tank/data-store/scripts/` — see
+All four run from `/mnt/storage-tank/data-store/scripts/` — see
 `scripts/README.md` in this directory for what each one does and the full
 restore procedure. Scripts are mirrored into `scripts/` here.
 
@@ -134,21 +134,37 @@ restore procedure. Scripts are mirrored into `scripts/` here.
 | `backup_to_backup_tank.py` | 14:00 daily | storage-tank → backup-tank: app data (ZFS replication), key data-store folders (rsync), TrueNAS config DB, and every App's rendered compose/config |
 | `remux_to_mp4.py --apply --max-minutes 360` | 14:30 daily | MKV → MP4 conversion fix for the Jellyfin iOS AVPlayer `-11850` bug |
 | `nextcloud_to_paperless.py` | every 15 min | Mirrors Nextcloud "research"/"Personal" folders into the Paperless-ngx consume inbox |
+| `gitea_repos_to_s3.py` | 14:30 daily | Mirrors Gitea's bare repos to the `gitea-backup` bucket on MinIO (LAN-direct to `aeacus-data-handler`, not through the internet) — added 2026-11-05, see `scripts/README.md` |
+
+There's also a `tdarr_worker_watchdog.sh` cron job (id 4, found 2026-11-05)
+that wasn't investigated or migrated into this repo yet — Tdarr itself is a
+stopped TrueNAS App (see section 4), so this watchdog's current relevance is
+unclear.
 
 ## 7. Known incidents
 
-- **2026-11-05 — backup-tank reattached.** VM 102's `scsi3` PCI/SCSI mapping
-  for the backup-tank disk had been dropped at some point (the physical disk
-  was untouched on the Proxmox host, just unmapped from the VM) — this left
-  `backup-tank` fully offline (zero visible disks to TrueNAS, not merely
-  degraded) and the daily `backup_to_backup_tank.py` cron silently
-  no-op'ing via its pool-health pre-flight check (it correctly refuses to
-  write when the destination pool isn't ONLINE). Fixed by re-running
+- **2026-11-05 — backup-tank disk was wiped, not just disconnected; pool
+  recreated from scratch.** VM 102's `scsi3` PCI/SCSI mapping for the
+  backup-tank disk had been dropped at some point (the physical disk was
+  untouched on the Proxmox host, just unmapped from the VM) — this alone
+  was fixed by re-running
   `qm set 102 --scsi3 /dev/disk/by-id/ata-WDC_WD5000AAKX-083CA1_WD-WMAYUR371592,serial=WD-WMAYUR371592,iothread=1`
-  on `pve` (safe hotplug on the running VM). **The pool itself still needs to
-  be re-imported from the TrueNAS UI** (Storage > Import Pool, or it may
-  reappear automatically after a TrueNAS reboot now that the disk is visible
-  again) — not done as part of this audit, left for the owner.
+  on `pve` (safe hotplug). But re-importing the pool failed
+  (`pool.import_find` found nothing) because **the disk had zero partitions
+  — its ZFS label was gone, not just unmounted** (confirmed two ways via the
+  TrueNAS API: `disk.get_unused` and `device.get_disks` both showed
+  `"parts": []`). Cause unknown — the disk sat unmapped at the Proxmox-host
+  level for an unknown period and something wiped it during that window.
+  **Everything backup-tank held before this (app data, data-store files,
+  compose exports) is gone** — there was nothing to import or recover.
+  Fixed by exporting the dead pool record (`pool.export 2`) and recreating
+  the pool fresh on the same disk (`pool.create`), then recreating the
+  `apps` (lz4) and `data-store-files` (zstd) datasets the backup script
+  expects. The daily cron job log confirms the exact outage window:
+  SUSPENDED from 2026-10-18, then MISSING every single day through
+  2026-11-04 (18 days with zero successful backups) — the job's own
+  pool-health pre-flight check correctly refused to write during all of it,
+  rather than failing partially or corrupting anything.
 - See `../../docs/changelog/171026-103353_jellyfin_11850_and_storage_fixes_changelog.md`
   for the original Oct 2026 incident this backup/remux tooling was built for.
 
