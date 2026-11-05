@@ -4,7 +4,21 @@ Self-built music player web app, deployed on `aeacus-data-handler` (VM 100).
 React/Vite frontend (served via nginx in production) + FastAPI backend, with
 Spotify-style search (RapidAPI `spotify81`), YouTube Music and Lidarr
 integration, and recommendations. Bundles its own GlitchTip instance
-(self-hosted Sentry-compatible error tracking) at `https://logs.lyre.qd.je`.
+(self-hosted Sentry-compatible error tracking) at `https://logs.ereuna.org`
+(migrated from the stale `logs.lyre.qd.je` on 2026-11-05).
+
+### Backend logging → GlitchTip
+
+As of 2026-11-05, the backend's `main.py` (in its own repo, not here) wraps
+`sys.stdout`/`sys.stderr` so that **every `print()` call anywhere in the
+backend** (it's entirely print-based, no `logging` module usage) is
+forwarded to GlitchTip as its own event, in addition to the console output
+you'd see in `docker logs`. This is deliberately scoped to the app's own
+logger (`propagate=False`) so it does **not** touch `sentry_sdk`'s default
+exception-tracking integrations — uvicorn's routine access logs are not
+captured, only the app's own print-based diagnostics. See the GlitchTip
+project "lyre-backend" (team "lyre", org "aeacus") for the live issue
+stream — `shortId`s look like `LYRE-BACKEND-<n>`.
 
 ## Source code
 
@@ -35,9 +49,21 @@ cp /path/to/this/repo/homelab/apps/lyre/docker-compose.yml .
 docker compose up -d
 ```
 
-First boot: GlitchTip needs its own setup (create an org/project in its UI at
-`:8085` or the public domain, then copy the generated DSNs back into `.env`
-as `GLITCHTIP_INTERNAL_DSN`/`VITE_GLITCHTIP_DSN`/`GLITCHTIP_DSN` and restart).
+First boot: GlitchTip needs its own setup — sign up at the public domain
+(open registration is on, see below), create a **Team**, create a
+**Project** under that team, then copy the generated DSN back into `.env`
+as `GLITCHTIP_INTERNAL_DSN` (host swapped to `glitchtip:8000`) /
+`VITE_GLITCHTIP_DSN` / `GLITCHTIP_DSN` and restart. This homelab uses team
+`lyre`, project `lyre-backend`.
+
+**Critical gotcha**: GlitchTip's `glitchtip/glitchtip:latest` image defaults
+to `SERVER_ROLE=web` — it will accept and queue every event (HTTP 200, looks
+fine) but **never processes them into visible issues**, because no worker
+is running to drain the queue. `GLITCHTIP_EMBED_WORKER: "true"` (already in
+this repo's `docker-compose.yml`) runs web + worker + beat in the single
+container, which this single-host deployment needs since there's no
+separate worker service defined. Without it, `firstEvent` on the project
+stays `null` forever and nothing shows up no matter how much you send.
 
 ## What changed from the live config when adding this to the repo
 

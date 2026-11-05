@@ -74,8 +74,13 @@ services:
       REDIS_URL: redis://glitchtip_redis:6379/0
       SECRET_KEY: ${GLITCHTIP_SECRET_KEY:?set a real random secret in .env, see .env.example}
       PORT: 8000
-      GLITCHTIP_DOMAIN: ${GLITCHTIP_DOMAIN:-https://logs.lyre.qd.je}
+      GLITCHTIP_DOMAIN: ${GLITCHTIP_DOMAIN:-https://logs.ereuna.org}
       ENABLE_OPEN_USER_REGISTRATION: "False"
+      # REQUIRED or GlitchTip silently drops every event forever: the image's
+      # default SERVER_ROLE is "web" only, which ingests events into its
+      # Postgres/Redis queue but never runs the worker that turns them into
+      # visible issues. This single container needs both roles.
+      GLITCHTIP_EMBED_WORKER: "true"
     depends_on:
       - glitchtip_db
       - glitchtip_redis
