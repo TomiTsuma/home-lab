@@ -43,14 +43,14 @@ Captured live 2026-11-05. Overview only — follow the links for exact configs.
   stack, qBittorrent...) — see `../infrastructure/truenas/README.md`.
 - **aeacus-data-handler (VM 100)**: Harbor registry, the "Ereuna/Aether"
   microservice platform (Postgres, Kafka, ClickHouse, Neo4j, OpenSearch,
-  Redis, MinIO), "Lyre" app + GlitchTip, native Vault + MinIO, NetBird,
-  MicroK8s, the real Nextcloud *desktop-sync* server (snap), Gotify, a
-  Cloudflare Tunnel.
+  Redis, MinIO), **"Lyre"** (self-built music player, see `../apps/lyre/`) +
+  its bundled GlitchTip, native Vault + MinIO, NetBird, MicroK8s, the real
+  Nextcloud *desktop-sync* server (snap), Gotify, a Cloudflare Tunnel.
 - **aeacus-dl (VM 101)**: GPU box — MLflow, Ollama, Open WebUI, code-server.
 - **minos**: Jellyfin + Plex (check for redundancy), its own Sonarr/Radarr/
   Prowlarr/qBittorrent instances (separate from TrueNAS's), Navidrome,
-  Kavita, a custom "Chlio" app, Pi-hole, Cloudflare Tunnel, WireGuard peer on
-  both meshes.
+  Kavita, **"Chlio"** (self-built productivity app, see `../apps/chlio/`),
+  Pi-hole, Cloudflare Tunnel, WireGuard peer on both meshes.
 
 ## Known open questions (ask the owner)
 

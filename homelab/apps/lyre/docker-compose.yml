@@ -1,0 +1,85 @@
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: lyre_backend
+    ports:
+      - "8000:8000"
+    environment:
+      - HOST=0.0.0.0
+      - PORT=8000
+      - GLITCHTIP_DSN=${GLITCHTIP_INTERNAL_DSN:-}
+      - LYRE_DATA_DIR=/root/.lyre
+      - LYRE_DB_PATH=/root/.lyre/lyre.db
+      - RAPIDAPI_KEY=${RAPIDAPI_KEY}
+    volumes:
+      - ./backend:/app
+      - ${LYRE_STATE_DIR:-~/.lyre}:/root/.lyre
+      - ${LYRE_MUSIC_DIR:-/mnt/nas/data-store/media/music}:/mnt/nas/data-store/media/music:ro
+    restart: unless-stopped
+    depends_on:
+      glitchtip:
+        condition: service_started
+        required: false
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=5)\" || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: lyre_frontend
+    ports:
+      - "5173:5173"
+    depends_on:
+      backend:
+        condition: service_started
+        required: false
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:5173/ || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  glitchtip_db:
+    image: postgres:15-alpine
+    container_name: lyre_glitchtip_db
+    environment:
+      POSTGRES_DB: glitchtip
+      POSTGRES_USER: glitchtip
+      POSTGRES_PASSWORD: ${GLITCHTIP_POSTGRES_PASSWORD:?set a real password in .env, see .env.example}
+    volumes:
+      - glitchtip_postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  glitchtip_redis:
+    image: redis:7-alpine
+    container_name: lyre_glitchtip_redis
+    restart: unless-stopped
+
+  glitchtip:
+    image: glitchtip/glitchtip:latest
+    container_name: lyre_glitchtip
+    ports:
+      - "8085:8000"
+    environment:
+      DATABASE_URL: postgres://glitchtip:${GLITCHTIP_POSTGRES_PASSWORD:?set a real password in .env, see .env.example}@glitchtip_db:5432/glitchtip
+      REDIS_URL: redis://glitchtip_redis:6379/0
+      SECRET_KEY: ${GLITCHTIP_SECRET_KEY:?set a real random secret in .env, see .env.example}
+      PORT: 8000
+      GLITCHTIP_DOMAIN: ${GLITCHTIP_DOMAIN:-https://logs.lyre.qd.je}
+      ENABLE_OPEN_USER_REGISTRATION: "False"
+    depends_on:
+      - glitchtip_db
+      - glitchtip_redis
+    restart: unless-stopped
+
+volumes:
+  glitchtip_postgres_data:
