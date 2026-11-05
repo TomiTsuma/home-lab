@@ -73,13 +73,31 @@ Full incident writeup: `../../../docs/changelog/171026-103353_jellyfin_11850_and
 
 ## `gitea_repos_to_s3.py`
 
-Added 2026-11-05. Mirrors Gitea's bare git repositories
-(`/mnt/.ix-apps/app_mounts/gitea/data/git`) to the `gitea-backup` bucket on
-the MinIO instance on `aeacus-data-handler` — an independent, off-TrueNAS
-copy alongside the local storage-tank → backup-tank replication that
+Added 2026-11-05. Backs up Gitea to the `gitea-backup` bucket on the MinIO
+instance on `aeacus-data-handler` — an independent, off-TrueNAS copy
+alongside the local storage-tank → backup-tank replication that
 `backup_to_backup_tank.py` already does (Part A covers all of
 `storage-tank/ix-apps`, including Gitea's full app data, but that copy lives
-on a disk in the same Proxmox host/VM chain).
+on a disk in the same Proxmox host/VM chain). Two parts, both run every time:
+
+- **Part A — raw bare repos** (`s3://gitea-backup/git/`): mirrors
+  `/mnt/.ix-apps/app_mounts/gitea/data/git` directly. Code only (commits,
+  branches, tags) — no issues/PRs/wiki/users/settings. Cheapest to restore:
+  `git clone` the resulting `.git` folders straight from S3, no Gitea
+  install needed. Additive-only, skip-if-size-matches (re-run safe).
+- **Part B — full `gitea dump`** (`s3://gitea-backup/full-dumps/gitea-dump-<timestamp>.zip`):
+  runs Gitea's own built-in dump command inside the live container
+  (`docker exec <container> gitea dump --type zip -f ...`, then `docker cp`
+  it out) — a single self-consistent archive with the full Postgres DB
+  (issues, PRs, wiki, users, settings, webhooks...), every repo, and
+  `app.ini`. This is what you'd actually restore from for a *complete*
+  Gitea recovery, not just the code. Needs `docker exec`/`docker cp`, hence
+  root (same as everything else here, via TrueNAS cron). Keeps the last 7
+  dumps in S3, prunes older ones automatically.
+- The gitea container is found dynamically at runtime
+  (`docker ps` filtered to an image starting with `gitea/gitea`) rather than
+  hardcoded by name/ID, since TrueNAS Apps' container names/IDs can change
+  across recreates.
 
 - **Uses the LAN IP of `aeacus-data-handler` (`192.168.100.9:9000`), not the
   public `s3.ereuna.org` domain** — deliberately, so this runs entirely over
