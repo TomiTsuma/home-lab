@@ -1,4 +1,8 @@
 #!/bin/bash
+# GENERIC REFERENCE SCRIPT — does NOT match this homelab's actual WireGuard
+# deployment. The real setup is two separate hand-configured meshes (wgbak
+# hub=TrueNAS, wgaz hub=Azure wg-hub), not this single linuxserver/wireguard
+# container with a dummy subnet. See REAL-TOPOLOGY.md before using this.
 
 set -e
 
