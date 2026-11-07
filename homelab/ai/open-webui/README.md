@@ -109,12 +109,21 @@ completes quickly with real bandwidth numbers, the passthrough is fine and
 the problem is in Ollama's GPU-discovery subprocess, Docker's GPU exposure to
 the container, or VM memory — not VFIO/IOMMU.
 
-## Known limits / not yet done
+## Deployment path
 
-- `docker-compose.yml` in this repo and the live file on `aeacus-dl` can
-  drift if either is edited directly without updating the other — there's no
-  CI/sync check. When in doubt, `git -C ~/home-lab status` on `aeacus-dl` is
-  the source of truth for what's actually different from this repo.
+As of 2026-11-07, the live stack runs directly from this repo checkout on
+`aeacus-dl` — `cd ~/home-lab/homelab/ai/open-webui && docker compose up -d`.
+It previously ran from an ad-hoc `~/open-webui/` directory outside any git
+repo (migrated here; the old directory is preserved as
+`~/open-webui.superseded-by-home-lab-repo-20261107` in case anything was
+missed, safe to delete once confirmed). `.env` lives alongside the compose
+file in this checkout (gitignored via `**/.env` — never commit it).
+
+**Editing config now takes effect directly**: `git pull` on `aeacus-dl`, then
+`docker compose up -d` in this directory to apply. No more copying changes
+between two locations.
+
+## Known limits / not yet done
 - No image digest pinning on `litellm`/`open-webui` (`:main-stable`/`:main`)
   — a `docker compose pull` could change behavior under you. Only `ollama` is
   pinned (`0.30.10`), because a newer Ollama version was one of several
