@@ -1,24 +1,28 @@
 version: "3.8"
 
+# Stack: Ollama (local models, GPU) + LiteLLM (OpenAI<->Anthropic proxy) + Open WebUI (UI).
+# Deployed on aeacus-dl (Proxmox VM 101, RTX 3060 passthrough). See README.md in this
+# directory for the full architecture, the Claude/Anthropic integration, and the GPU
+# gotchas (host prerequisites, cgroup driver, persistence mode) that this stack depends on.
+
 services:
   ollama:
-    image: ollama/ollama
+    image: ollama/ollama:0.30.10 # pinned: see README.md "Known limits / not yet done"
     container_name: ollama
     restart: always
     ports:
       - "11434:11434"
     volumes:
       - ollama:/root/.ollama
-    # ----------------------------------------------------
-    # FIX 1: Ensure Ollama is listening on all interfaces
-    # so the Open WebUI container can reliably connect.
-    # ----------------------------------------------------
     environment:
+      # Listen on all interfaces so open-webui/litellm (and other LAN hosts, e.g. Chlio
+      # on minos) can reach it, not just localhost inside the container.
       - OLLAMA_HOST=0.0.0.0
-    # ----------------------------------------------------
-    # NEW: GPU Configuration (NVIDIA/AMD ROCm)
-    # Requires NVIDIA Container Toolkit or ROCm on host.
-    # ----------------------------------------------------
+      # Keep loaded models resident in VRAM forever. A cold load of a ~6-7GB model takes
+      # ~4 minutes (models load with --no-mmap, i.e. a full read into RAM first) — the
+      # default 5m keep-alive means any gap in traffic longer than 5 minutes pays that
+      # cost again on the next request. -1 = never unload.
+      - OLLAMA_KEEP_ALIVE=-1
     deploy:
       resources:
         reservations:
@@ -27,16 +31,29 @@ services:
               count: all
               capabilities: [gpu]
 
+  litellm:
+    image: ghcr.io/berriai/litellm:main-stable
+    container_name: litellm
+    restart: always
+    ports:
+      - "4000:4000"
+    env_file:
+      - .env
+    volumes:
+      - ./litellm-config.yaml:/app/config.yaml
+    command: ["--config", "/app/config.yaml", "--port", "4000"]
+
   open-webui:
     image: ghcr.io/open-webui/open-webui:main
     container_name: open-webui
     depends_on:
       - ollama
+      - litellm
     restart: always
     ports:
       - "3005:8080"
     environment:
-      # Correct config for container-to-container communication
+      # Container-to-container DNS name, not localhost/an external IP.
       - OLLAMA_HOST=http://ollama:11434
     volumes:
       - open-webui:/app/backend/data

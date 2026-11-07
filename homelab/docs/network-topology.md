@@ -9,9 +9,16 @@ Captured live 2026-11-05. Overview only — follow the links for exact configs.
 - Proxmox host `pve`: `192.168.100.145/24`, single bridge `vmbr0` on the
   onboard NIC, no VLANs. See `../infrastructure/proxmox/REBUILD.md`.
 - TrueNAS (VM 102): `192.168.100.10/24` (+ Tailscale `100.100.133.10`).
-- No other static LAN IPs confirmed for VMs 100/101 at audit time (reachable
-  via Tailscale, see below) — `minos` is a separate host, **not** a Proxmox
-  guest on `pve` (its hosting substrate is unclear — flagged for the owner to
+- `aeacus-dl` (VM 101): `192.168.100.17/24` (+ Tailscale `100.101.189.31`) —
+  confirmed 2026-11-07. Note: this VM's NIC was renamed by Linux's
+  predictable-naming scheme after a machine-type change (`ens18` →
+  `enp6s18`); if it ever goes unreachable again after a Proxmox-side config
+  change, check `/etc/netplan/*.yaml` against the guest's actual interface
+  name before assuming a deeper network fault — see
+  `../infrastructure/proxmox/pci-passthrough.md`.
+- No static LAN IP confirmed for VM 100 at audit time (reachable via
+  Tailscale, see below) — `minos` is a separate host, **not** a Proxmox guest
+  on `pve` (its hosting substrate is unclear — flagged for the owner to
   clarify).
 
 ## Overlay / mesh networks — four separate ones, not unified
@@ -46,7 +53,10 @@ Captured live 2026-11-05. Overview only — follow the links for exact configs.
   Redis, MinIO), **"Lyre"** (self-built music player, see `../apps/lyre/`) +
   its bundled GlitchTip, native Vault + MinIO, NetBird, MicroK8s, the real
   Nextcloud *desktop-sync* server (snap), Gotify, a Cloudflare Tunnel.
-- **aeacus-dl (VM 101)**: GPU box — MLflow, Ollama, Open WebUI, code-server.
+- **aeacus-dl (VM 101)**: GPU box (RTX 3060 passthrough) — native MLflow
+  (port 5000) and code-server, plus a Docker Compose stack (ollama + litellm
+  + open-webui, see `../ai/open-webui/`) serving local models and a
+  Claude/Anthropic connection through the same Open WebUI instance.
 - **minos**: Jellyfin + Plex (check for redundancy), its own Sonarr/Radarr/
   Prowlarr/qBittorrent instances (separate from TrueNAS's), Navidrome,
   Kavita, **"Chlio"** (self-built productivity app, see `../apps/chlio/`),
