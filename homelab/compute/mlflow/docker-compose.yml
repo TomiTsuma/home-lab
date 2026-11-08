@@ -1,1 +1,53 @@
-# Docker Compose for MLflow
+services:
+  mlflow:
+    build: .
+    image: ereuna/mlflow-server:3.7.0
+    container_name: mlflow
+    restart: unless-stopped
+    # Joins the Aether stack's existing bridge network so it can reach
+    # ereuna_postgres by container name. That network is created by the
+    # main ereuna docker-compose.prod.yml, not here.
+    networks:
+      - ereuna_network
+    # 5000 is taken by Harbor's nginx on this host; publish on 5001 instead.
+    # ereuna-cloudflared runs with network_mode: host, so it reaches this
+    # via http://localhost:5001.
+    ports:
+      - "5001:5000"
+    environment:
+      MLFLOW_BACKEND_STORE_URI: postgresql://mlflow_user:${MLFLOW_POSTGRES_PASSWORD:?set in .env}@ereuna_postgres:5432/mlflow
+      MLFLOW_ARTIFACTS_DESTINATION: s3://mlflow-artifacts
+      # Native MinIO on the host is reachable from this bridge network via
+      # its gateway IP — the same pattern already used to route
+      # s3.ereuna.org (see ../../data-services/minio/).
+      MLFLOW_S3_ENDPOINT_URL: http://172.22.0.1:9000
+      AWS_ACCESS_KEY_ID: ${MLFLOW_MINIO_ACCESS_KEY:?set in .env}
+      AWS_SECRET_ACCESS_KEY: ${MLFLOW_MINIO_SECRET_KEY:?set in .env}
+      MLFLOW_ADMIN_USERNAME: ${MLFLOW_ADMIN_USERNAME:?set in .env}
+      MLFLOW_ADMIN_PASSWORD: ${MLFLOW_ADMIN_PASSWORD:?set in .env}
+      MLFLOW_FLASK_SERVER_SECRET_KEY: ${MLFLOW_FLASK_SERVER_SECRET_KEY:?set in .env}
+      # Comma-separated Host headers mlflow's DNS-rebinding guard will
+      # accept, port-qualified where clients hit it by IP:port. See
+      # README.md "Allowed hosts" before adding a new client.
+      MLFLOW_ALLOWED_HOSTS: ${MLFLOW_ALLOWED_HOSTS:?set in .env}
+    volumes:
+      - mlflow_auth:/mlflow/auth
+    # aeacus-data-handler is a 2-core box already running load average 3+
+    # with ~25 other containers (see ../../apps/lyre/docker-compose.yml for
+    # the same constraint on GlitchTip). Capped so this can't add meaningful
+    # contention; --workers 1 in entrypoint.sh keeps it to one process.
+    cpus: 1.0
+    mem_limit: 768m
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/health', timeout=5)\" || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+networks:
+  ereuna_network:
+    external: true
+
+volumes:
+  mlflow_auth:
