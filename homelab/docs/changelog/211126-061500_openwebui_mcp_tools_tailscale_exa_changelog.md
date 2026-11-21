@@ -180,6 +180,95 @@ had no room, and the assistant message was saved with empty content.
   - Ollama was recreated with the CUDA libraries pre-warmed and came up on CUDA.
   - qwen3.5:9b was reloaded.
 
+## 5e. Google Workspace switched to SELF-HOSTED `workspace-mcp` (hosted servers denied tool calls)
+
+**Diagnosis of the hosted servers**
+- All 4 OAuth sign-ins succeeded, and the token is valid with `drive.readonly`.
+- The Drive REST API `files.list` worked with the same token.
+- `drivemcp` `tools/list` worked, but every `tools/call` returned
+  `isError: "The caller does not have permission"`.
+- Google's guide makes Developer Preview membership a prerequisite, along with the "Use this
+  client for an AI-powered agent" setting on the OAuth client.
+- The account is personal Gmail, so the owner asked for a local server instead.
+
+**Built**
+- Service `google-workspace-mcp`: `workspace-mcp==2.6.0`, non-root uid 10001, read-only rootfs,
+  `cap_drop: ALL`, no-new-privileges, 1 GB RAM limit.
+- Flags: `--single-user --read-only --tool-tier core --tools drive docs sheets slides`.
+- Streamable HTTP on `0.0.0.0:8000`. The default bind was 127.0.0.1, so open-webui couldn't
+  reach it; this is fixed with `WORKSPACE_MCP_HOST`.
+- Outbound hosts in the source are Google only.
+
+**Isolation**
+- A dedicated `gws` network, shared only with open-webui.
+- Host publish `127.0.0.1:8001`.
+- `tailscale serve --https=443 --set-path /oauth2callback` exposes only the callback path.
+- Verified: the LAN gets 000 on `:8001`. The sandbox fails DNS for the service and is blocked
+  via both Docker gateway addresses. `/oauth2callback` returns 400 without OAuth parameters.
+  `/mcp` and `/health` on the Tailscale HTTPS address stay with Open WebUI.
+
+**Open WebUI**
+- Removed the `gdrive`, `gdocs`, `gsheets` and `gslides` connections and added `gworkspace`
+  (auth none).
+- On all 9 models, `toolIds` now has `server:mcp:gworkspace` in place of the 4 hosted ids.
+- Script: `google-workspace-mcp/register_in_openwebui.py`.
+
+**Context budget**
+- The complete read-only tier was 23 tools at about 9.2k tokens, too much for the 16k models
+  with everything default-on.
+- Switched to `--tool-tier core`: 7 tools at about 3.9k tokens.
+
+**Open WebUI side effect.** Recreating open-webui to join the new network took about 6 minutes
+before it was healthy: a fresh container re-downloads the embedding model and pip-reinstalls the
+plugins' frontmatter requirements.
+
+**Signed in and tested (DONE).** The owner completed the sign-in. Credentials are stored as
+`/data/credentials/tommytsuma7@gmail.com.json` (mode 0600, uid gws). Live test through Open
+WebUI's MCPClient:
+- `search_drive_files` for Docs, Sheets and Slides: 3 results each.
+- `get_doc_content`: OK.
+- `read_sheet_values` A1:D5: 5 rows.
+- `get_presentation`: OK.
+
+**Known issue.** `get_doc_content` returned the whole document (181k chars, about 45k tokens)
+for a long proposal. One such result overflows the 16k-context models and uses most of
+qwen3.5:9b's 64k. The server has no output cap of its own; see the README for mitigations.
+
+## 5d. Google Drive/Docs/Sheets/Slides via Google-hosted MCP servers
+
+The owner chose option B: Workspace tools that read and act on files, not just the file picker.
+Instead of self-hosting `taylorwilsdon/google_workspace_mcp`, these use **Google's own hosted
+MCP servers**.
+- The owner had enabled the "MCP API" for each product in Google Cloud.
+- Probed live: `https://{drive,docs,sheets,slides}mcp.googleapis.com/mcp/v1`.
+- Each publishes RFC 9728 protected-resource metadata with `authorization_servers=accounts.google.com`
+  plus read-only and read-write scopes.
+- Google has no `registration_endpoint` and supports PKCE S256.
+
+Why hosted rather than self-hosted:
+- There is no container to run or patch.
+- mcp-tools' sandbox has internet access and shares the Docker network with Open WebUI. A
+  self-hosted Workspace server on that network would have let sandboxed code reach the Google
+  account. A Google-hosted server needs the user's OAuth token, which only Open WebUI holds.
+
+Setup:
+- `google-mcp/connect_google_mcp.py` mirrors the admin UI's two steps:
+  1. `POST /api/v1/configs/oauth/clients/register?type=mcp` with static credentials.
+  2. Upsert of `tool_server.connections` as type `mcp`, auth `oauth_2.1_static`.
+- The OAuth client ID and secret are in `.env` and in Open WebUI's config DB, not in git.
+- Connections `gdrive`, `gdocs`, `gsheets` and `gslides` are read-only for now.
+- The `TOOL_SERVER_CONNECTIONS` env var in compose is now superseded by the DB value (comment added).
+
+Verified:
+- Each server's authorize redirect goes to `accounts.google.com/o/oauth2/v2/auth` with the right
+  client ID, redirect URI `https://aeacus-dl.tailaee7b8.ts.net/oauth/clients/mcp:<id>/callback`,
+  read-only scopes, PKCE S256, `access_type=offline` and `prompt=consent`.
+- All 9 models have `server:mcp:g*` in their default `toolIds`.
+
+Pending:
+- The owner's first sign-in per server, and a live read test per service.
+- Measuring the tool-schema size once the servers are connected.
+
 ## 5c. All tools/plugins default-on for all models (owner's request)
 
 - **Tools:** all 9 models now have `toolIds` = Homelab MCP plus inline_visualizer, email_composer,

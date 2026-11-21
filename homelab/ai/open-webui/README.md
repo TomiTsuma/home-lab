@@ -107,6 +107,66 @@ What is in place:
 - Check: `docker exec ollama ollama ps` should show `CONTEXT 65536`; grep the ollama log for
   `truncated = 1`.
 
+## Chlio MCP (`chlio-mcp/`)
+
+Open WebUI has Chlio (the notes / mind-map / planner app at `https://chlio.ereuna.org`) registered as MCP server
+`chlio` (`https://chlio.ereuna.org/mcp`, auth *Bearer*, token `open-webui`, 365 days). 26 tools (about 4.2k tokens of
+schema): mind maps from an outline, tasks, events, notes, Jira, search. Enabled by default on **qwen3.5:9b and the
+Claude models only**; the 16k-context local models are skipped because Chlio's schemas plus the other default tools
+would leave them no room to answer. To change that: `CHLIO_MODELS='*'` (or other patterns), and to limit the tool
+set add `?groups=mindmaps,planner,notes,jira,search` to `CHLIO_MCP_URL`.
+
+```sh
+# on minos: mint a token, show it only to the next command
+{ printf '%s
+' "$SUDO_PASSWORD"; ssh minos@100.79.34.33 'docker exec clio-app node server/cli.js token create open-webui --days 365 | tail -1'; } | ssh aeacus@100.101.189.31 '...'
+```
+`chlio-mcp/connect_chlio_mcp.py` is idempotent and reads the token from stdin only (see its docstring). To rotate: revoke
+the old token in Chlio (Account -> Access tokens, or `cli.js token revoke <id>`) and re-run it with a new one.
+Tested with Open WebUI's own MCP client from inside the container (connects in ~0.7 s, 26 tools, read calls work).
+
+## Google Drive / Docs / Sheets / Slides (`google-workspace-mcp/`)
+
+**Self-hosted** [`workspace-mcp`](https://github.com/taylorwilsdon/google_workspace_mcp)
+(MIT, pinned `2.6.0`). It calls the regular Google REST APIs.
+
+**Why not the Google-hosted servers.** The first attempt (2026-11-21, `google-mcp/`, now
+superseded) used Google's hosted `*mcp.googleapis.com` servers. Sign-in and tool listing worked,
+but every tool call returned *"The caller does not have permission"*. Those servers are in the
+Workspace Developer Preview and need the Cloud project enrolled, and the account is personal
+Gmail.
+
+**How it runs**
+- **Mode and scope:** single-user, read-only, `--tool-tier core`, Drive/Docs/Sheets/Slides only.
+  That gives 7 tools at about 3.9k tokens; the full read-only set was 23 tools at about 9.2k:
+  `search_drive_files`, `get_drive_file_content`, `get_drive_file_download_url`,
+  `get_drive_shareable_link`, `get_doc_content`, `read_sheet_values`, `get_presentation`.
+- **Registration:** registered in Open WebUI as `gworkspace` (auth: none) and default-on for every
+  model (`google-workspace-mcp/register_in_openwebui.py`).
+- **Credentials:** the Google refresh token lives in volume `open-webui_gws-data` at
+  `/data/credentials`.
+
+**Isolation.** The `/mcp` endpoint has no auth of its own, so access is limited by network:
+- The container is attached only to the `gws` Docker network, whose only other member is open-webui.
+- Its only published port is `127.0.0.1:8001`.
+- `tailscale serve` exposes exactly one path from it: `https://aeacus-dl.tailaee7b8.ts.net/oauth2callback`.
+- Verified: the LAN can't reach `:8001`. The mcp-tools sandbox can't resolve the service name,
+  and its requests to `172.17.0.1:8001` and `172.18.0.1:8001` are blocked.
+
+**Google OAuth client**
+- Required Authorized redirect URI: `https://aeacus-dl.tailaee7b8.ts.net/oauth2callback`.
+- It reuses `GOOGLE_OAUTH_CLIENT_ID` / `_SECRET` from `.env`.
+- `GOOGLE_WORKSPACE_USER_EMAIL` in `.env` sets the default account.
+
+**Sign in or re-auth.** Any Google tool call made without valid credentials returns a Google
+sign-in link. Open it in a browser on the tailnet. If the app is External and in Testing, Google
+expires the refresh token after 7 days.
+
+**Read-write later**
+1. Drop `--read-only` from `command:` in compose.
+2. Add the write scopes to the consent screen.
+3. Recreate the container and sign in again.
+
 ## Community plugins (`plugins/`)
 
 Installed 2026-11-21. The plugins run arbitrary Python inside Open WebUI, so each file was read

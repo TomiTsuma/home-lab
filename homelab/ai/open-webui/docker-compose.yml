@@ -96,6 +96,10 @@ services:
       - WEB_SEARCH_RESULT_COUNT=5
       - WEB_SEARCH_CONCURRENT_REQUESTS=5
       # --- MCP tool server (PersistentConfig too) ----------------------------------------
+      # NOTE (2026-11-21): this env only SEEDED the list. The DB copy is now authoritative and
+      # also holds the 4 Google Workspace MCP servers (added by google-mcp/connect_google_mcp.py,
+      # incl. the OAuth client secret, which must not live in this file). Editing this line has
+      # no effect unless the DB value is cleared.
       # auth_type=session: Open WebUI forwards the logged-in user's own JWT; mcp-tools
       # verifies it against /api/v1/auths/ on every request (see mcp-tools/server.py).
       # Default 10s. Open WebUI 0.13's MCP SDK 2.x first probes `server/discover` (new
@@ -106,6 +110,57 @@ services:
       - 'TOOL_SERVER_CONNECTIONS=[{"type":"mcp","url":"http://mcp-tools:8000/mcp","path":"","auth_type":"session","key":"","config":{"enable":true},"info":{"id":"homelab","name":"Homelab Tools","description":"Sandboxed shell/python, LlamaParse document extraction, scrape.do search/fetch, publish files to s3.ereuna.org"}}]'
     volumes:
       - open-webui:/app/backend/data
+    networks:
+      - default
+      # Shared ONLY with google-workspace-mcp, so nothing else (notably mcp-tools' sandbox,
+      # which has internet access) can reach the server that holds the Google refresh token.
+      - gws
+
+  # Google Workspace MCP (Drive/Docs/Sheets/Slides via the regular Google REST APIs).
+  # Single-user: holds ONE Google account's refresh token (credentials volume). The /mcp
+  # endpoint has no auth of its own, so isolation is by network: it is attached only to the
+  # `gws` network (open-webui is the only other member) and publishes only 127.0.0.1:8001, which
+  # `tailscale serve` exposes for the single path /oauth2callback (Google redirect after consent).
+  google-workspace-mcp:
+    build: ./google-workspace-mcp
+    image: homelab/google-workspace-mcp:2.6.0
+    container_name: google-workspace-mcp
+    restart: always
+    # --tool-tier core: the "complete" read-only set was 23 tools / ~9.2k tokens of schema sent
+    # with EVERY request (all tools are default-on for all models) -> overflows the 16k-context
+    # local models. Core keeps search/list/read for each service.
+    command: ["--transport", "streamable-http", "--single-user", "--read-only",
+              "--tool-tier", "core", "--tools", "drive", "docs", "sheets", "slides"]
+    environment:
+      - GOOGLE_OAUTH_CLIENT_ID=${GOOGLE_OAUTH_CLIENT_ID:?set GOOGLE_OAUTH_CLIENT_ID in .env}
+      - GOOGLE_OAUTH_CLIENT_SECRET=${GOOGLE_OAUTH_CLIENT_SECRET:?set GOOGLE_OAUTH_CLIENT_SECRET in .env}
+      - USER_GOOGLE_EMAIL=${GOOGLE_WORKSPACE_USER_EMAIL:?set GOOGLE_WORKSPACE_USER_EMAIL in .env}
+      - WORKSPACE_MCP_PORT=8000
+      # Default binds 127.0.0.1 inside the container (unreachable from open-webui and from the
+      # published port). 0.0.0.0 here is still only reachable via the gws network + 127.0.0.1:8001.
+      - WORKSPACE_MCP_HOST=0.0.0.0
+      - WORKSPACE_MCP_BASE_URI=http://google-workspace-mcp
+      # Browser-facing callback (must also be an Authorized redirect URI on the Google client).
+      - GOOGLE_OAUTH_REDIRECT_URI=https://aeacus-dl.tailaee7b8.ts.net/oauth2callback
+      - WORKSPACE_EXTERNAL_URL=https://aeacus-dl.tailaee7b8.ts.net
+      # TLS terminates at tailscale serve; the last hop to this container is plain HTTP, which
+      # oauthlib refuses without this flag. The browser<->server leg is HTTPS.
+      - OAUTHLIB_INSECURE_TRANSPORT=1
+    ports:
+      - "127.0.0.1:8001:8000"
+    volumes:
+      - gws-data:/data
+    networks:
+      - gws
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    read_only: true
+    tmpfs: ["/tmp:size=256m", "/home/gws:size=64m,uid=10001,gid=10001"]
+    mem_limit: 1g
+    pids_limit: 256
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
 
   # MCP tool server (our own code, ./mcp-tools). Reachable ONLY from containers on this
   # compose network — no `ports:` on purpose — and every request must carry a valid Open
@@ -145,3 +200,8 @@ volumes:
   ollama:
   open-webui:
   mcp-workspace:
+  gws-data:
+
+networks:
+  default: {}
+  gws: {}
