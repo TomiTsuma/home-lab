@@ -1,0 +1,234 @@
+[
+  {
+    "id": "async_context_compression",
+    "kind": "function",
+    "file": "src/async_context_compression.py",
+    "name": "Async Context Compression",
+    "source": "github.com/Fu-Jie/openwebui-extensions@76e9d9901fe3376cd11fb43b734ee568788270cd/plugins/filters/async-context-compression",
+    "description": "Summarises older turns so long chats fit the context window (summaries by local qwen3.5:9b).",
+    "active": true,
+    "models": [
+      "qwen3.5:9b"
+    ],
+    "valves": {
+      "summary_model": "qwen3.5:9b",
+      "summary_model_max_context": 65536,
+      "max_summary_tokens": 4096,
+      "summary_fail_mode": "silent",
+      "debug_mode": false,
+      "show_debug_log": false
+    },
+    "sha256": "82a63ef9c441e23795b40a25decec01cbfc8b479c0ac046199e65e166e3c5358",
+    "global": false
+  },
+  {
+    "id": "markdown_normalizer",
+    "kind": "function",
+    "file": "src/markdown_normalizer.py",
+    "name": "Markdown Normalizer",
+    "source": "github.com/Fu-Jie/openwebui-extensions@76e9d9901fe3376cd11fb43b734ee568788270cd/plugins/filters/markdown_normalizer",
+    "description": "Repairs malformed markdown in model output.",
+    "active": true,
+    "valves": {
+      "enable_latex_fix": false,
+      "enable_mermaid_fix": false,
+      "show_debug_log": false
+    },
+    "sha256": "f1523b5b8441d0e1d8c4459a76ec510a7326290ec307f67c67120d0670445c83",
+    "global": true
+  },
+  {
+    "id": "mermaid_doctor",
+    "kind": "function",
+    "file": "src/mermaid_doctor.py",
+    "name": "Mermaid Doctor",
+    "source": "github.com/annibale-x/open-webui-mermaid-doctor@f0789fa4",
+    "description": "Deterministically repairs broken Mermaid diagrams.",
+    "active": true,
+    "user_valves": {
+      "inject_few_shots": false,
+      "strip_styles": true
+    },
+    "sha256": "4eacb39b50c0545701c497948d06818b461598f924ec8dfc9cbd381f032d7ab0",
+    "global": true
+  },
+  {
+    "id": "token_usage_display",
+    "kind": "function",
+    "file": "src/token_usage_display.py",
+    "name": "Token Usage Display",
+    "source": "github.com/SmetDenis/openwebui-token-usage-display@d5ea3411",
+    "description": "Shows token counts, speed and context use under each reply.",
+    "active": true,
+    "valves": {
+      "fetch_prices_from_modelsdev": false,
+      "fetch_context_from_modelsdev": false,
+      "show_balance": false,
+      "debug_mode": false
+    },
+    "sha256": "ca275e69b879e2a92b1e68b32d8e4e2b11861bdc60e003b3d04b2b7a1dea5d15",
+    "global": true
+  },
+  {
+    "id": "export_to_word",
+    "kind": "function",
+    "file": "src/export_to_word_enhanced.py",
+    "name": "Export to Word",
+    "source": "github.com/Fu-Jie/openwebui-extensions@76e9d9901fe3376cd11fb43b734ee568788270cd/plugins/actions/export_to_docx (requirements pinned locally)",
+    "description": "Export the chat to a formatted .docx.",
+    "active": true,
+    "valves": {
+      "TITLE_SOURCE": "chat_title",
+      "EMBED_EXTERNAL_IMAGES": false
+    },
+    "sha256": "1f103562e486aa5ce28ff83d7f4ede312a33153df596e1a65ba3daf26a7dc1cb",
+    "global": true
+  },
+  {
+    "id": "export_to_excel",
+    "kind": "function",
+    "file": "src/export_to_excel.py",
+    "name": "Export to Excel",
+    "source": "github.com/Fu-Jie/openwebui-extensions@76e9d9901fe3376cd11fb43b734ee568788270cd/plugins/actions/export_to_excel",
+    "description": "Export markdown tables to .xlsx.",
+    "active": true,
+    "valves": {
+      "TITLE_SOURCE": "chat_title",
+      "EXPORT_SCOPE": "last_message",
+      "SHOW_DEBUG_LOG": false
+    },
+    "sha256": "0ada31a5a03cad8050b40353487a5385bdf924906875d6d5560fded896bd148b",
+    "global": true
+  },
+  {
+    "id": "download_code_blocks",
+    "kind": "function",
+    "file": "src/download_code_blocks.py",
+    "name": "Download Code Blocks",
+    "source": "openwebui.com community post (no git source; sha256 is the pin) 06f51b22",
+    "description": "Download each fenced code block as a correctly named file.",
+    "active": true,
+    "valves": {
+      "auto_download": false
+    },
+    "sha256": "ca5545bdd1e39a9f5917c54392d5ca28cf992079151e673242d563022d40ddd6",
+    "global": true
+  },
+  {
+    "id": "regenerate_followups",
+    "kind": "function",
+    "file": "src/regenerate_followups.py",
+    "name": "Regenerate Follow-ups",
+    "source": "openwebui.com community post (no git source; sha256 is the pin) 9b5ac6d6",
+    "description": "Regenerate only the follow-up suggestions.",
+    "active": true,
+    "valves": {
+      "ENABLE_EVENT_EMITTERS": false,
+      "ENABLE_NOTIFICATION": true,
+      "ENABLE_DEBUG_LOGS": false
+    },
+    "sha256": "95e78f6b7a247675d696b3633d0f78054d561d9c1bce495a3ff59170a4d208a6",
+    "global": true
+  },
+  {
+    "id": "pin_message",
+    "kind": "function",
+    "file": "src/pin_message.py",
+    "name": "Pin Message",
+    "source": "openwebui.com community post (no git source; sha256 is the pin) 143594d1",
+    "description": "Pin (favourite) a message.",
+    "active": true,
+    "sha256": "e90ae86d85ca81eb433ecba87bd94e687fb462d7465cb291985830990825eb18",
+    "global": true
+  },
+  {
+    "id": "add_web_sources_to_knowledge",
+    "kind": "function",
+    "file": "src/add_web_sources_to_knowledge.py",
+    "name": "Add Web Sources to Knowledge",
+    "source": "openwebui.com community post (no git source; sha256 is the pin) 65d97417",
+    "description": "Save cited web sources into a Knowledge base.",
+    "active": true,
+    "valves": {
+      "max_urls_per_action": 8,
+      "skip_confirmation": false
+    },
+    "sha256": "9d00bcdd48460b74124a517f7bab779a42f1753620c17a08c1a195f80eb44b36",
+    "global": true
+  },
+  {
+    "id": "inline_visualizer",
+    "kind": "tool",
+    "file": "src/inline_visualizer_streaming.py",
+    "name": "Inline Visualizer",
+    "source": "github.com/Classic298/open-webui-plugins@917c88f3029c0c6500139ba7b7b061f358d8aaea/inline-visualizer-v2/tool.py",
+    "description": "Render charts/diagrams/HTML inline (needs 'iframe Sandbox Allow Same Origin' - see README).",
+    "valves": {
+      "security_level": "strict"
+    },
+    "sha256": "38ed6323c3b2b7c1f4dbfafbf4ea04372f8fa3694672ec74f8bb5dba258b740b"
+  },
+  {
+    "id": "visualize",
+    "kind": "skill",
+    "file": "src/inline_visualizer_streaming_SKILL.md",
+    "name": "visualize",
+    "source": "github.com/Classic298/open-webui-plugins@917c88f3029c0c6500139ba7b7b061f358d8aaea/inline-visualizer-v2/SKILL.md",
+    "description": "Render rich interactive visuals (SVG, HTML widgets, Chart.js) inline via visualize(). Use only when the user explicitly asks for a visualization.",
+    "sha256": "d7fa8dab49d0fa2e4e55ab711b3d5aeaf8ba80bb1668034ba9d4ab03529f70a2"
+  },
+  {
+    "id": "email_composer",
+    "kind": "tool",
+    "file": "src/email_composer.py",
+    "name": "Email Composer",
+    "source": "github.com/Classic298/open-webui-plugins@917c88f3029c0c6500139ba7b7b061f358d8aaea/email-composer/tool.py",
+    "description": "Draft an email as an editable card (mailto / .eml).",
+    "sha256": "1a9c7cb22a234842e5b329308781d94a1556a4b1e370f34a63984815e7ce8204"
+  },
+  {
+    "id": "revealjs_slide_deck_builder",
+    "kind": "tool",
+    "file": "src/revealjs_slide_deck_builder.py",
+    "name": "Reveal.js Slide Deck Builder",
+    "source": "openwebui.com community post (no git source; sha256 is the pin) 59243191",
+    "description": "Build Reveal.js slide decks inline (needs 'iframe Sandbox Allow Same Origin').",
+    "sha256": "2442f74cddaf6b5fb79d9a8a55156273b178099cad1197af519b04485c90e2df"
+  },
+  {
+    "id": "ollama_model_card_generator",
+    "kind": "tool",
+    "file": "src/ollama_model_card_generator.py",
+    "name": "Ollama Model Card Generator",
+    "source": "openwebui.com community post (no git source; sha256 is the pin) ee80d7a1",
+    "description": "Admin: generate model cards from Ollama metadata (installed in dry-run mode).",
+    "valves": {
+      "hide_base_models": true
+    },
+    "valves_suffix_true": "dry_run",
+    "sha256": "b96e411de3bf2621c248380a93eee83eda483cecdce0f37168bd17d5c10661a9"
+  },
+  {
+    "id": "sub_agent",
+    "kind": "tool",
+    "file": "src/sub_agent.py",
+    "name": "Sub Agent",
+    "source": "github.com/Skyzi000/open-webui-extensions@324a0692d71c70e06c19b43ca5ba52dc03a4d907/tools/sub_agent.py",
+    "description": "Delegate multi-step tool work to an isolated sub-agent; returns only the result.",
+    "valves": {
+      "MAX_ITERATIONS": 20,
+      "MAX_PARALLEL_AGENTS": 2,
+      "DEFAULT_MODEL": "qwen3.5:9b"
+    },
+    "sha256": "afa515914904cfbd293f1e43cf50d1ac52c9ad442ee4689c92a0c93b5b5b21e0"
+  },
+  {
+    "id": "arxiv_search",
+    "kind": "tool",
+    "file": "src/arxiv_search.py",
+    "name": "arXiv Search",
+    "source": "github.com/Haervwe/open-webui-tools@c1fac21ad8d0f25db8d1dd1b60733d3daf250744/tools/arxiv_search_tool.py",
+    "description": "Semantic arXiv search (queries go to searchthearxiv.com) + read papers from arxiv.org.",
+    "sha256": "c56f94be95a06fb025be00bd0d2f29ca6e6eaac24659d2d95943a6bd423a087e"
+  }
+]

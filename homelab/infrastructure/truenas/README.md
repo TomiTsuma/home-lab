@@ -80,13 +80,13 @@ anything outside TrueNAS (reverse proxy, firewall rule) hardcodes one.
 | audiobookshelf | RUNNING | advplyr/audiobookshelf:2.36.1 | 30067 | `data-store/audiobooks` (+config/metadata subdirs) |
 | lazylibrarian | RUNNING | linuxserver/lazylibrarian | 31089 | `data-store/audiobooks` → `/books` |
 | seerr2 | RUNNING | ghcr.io/seerr-team/seerr:v3.4.1 | 30303 | config |
+| tdarr | RUNNING (as of 2026-11-07 — was STOPPED/uncertain at the 2026-11-05 audit) | ghcr.io/haveagitgat/tdarr:3.06.00 | 30088 (Web UI), 30029 (server/API) | `data-store/media` → `/media`, `data-store/tdarr-cache` → `/temp`, `app_mounts/tdarr/{configs,logs,server}` — see `tdarr.md` for full config |
 | plex1 | STOPPED | plex:1.43.4 | — | — |
 | seerr | STOPPED | seerr:v3.4.1 (older, superseded by seerr2) | — | — |
 | lyrion-music-server | STOPPED | 9.0.4 | — | — |
 | wg-easy | STOPPED | 15.1.0 | — | has app_configs from Dec 2025 |
 | adguard-home | STOPPED | v0.107.70 | — | — |
 | readarr | STOPPED | 0.4.18.2805 | — | — |
-| tdarr | STOPPED | — | — | app_config dir exists but was being created/torn down during this audit — check its state before assuming it's wanted |
 
 **Not recreatable from this table alone**: exact environment variables (DB
 passwords, API keys, PUID/PGID) are inside TrueNAS's rendered

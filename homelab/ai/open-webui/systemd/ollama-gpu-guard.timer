@@ -1,0 +1,10 @@
+[Unit]
+Description=Periodically verify ollama is on the GPU (boot + every 15 min)
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=15min
+Unit=ollama-gpu-guard.service
+
+[Install]
+WantedBy=timers.target

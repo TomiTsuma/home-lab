@@ -1,0 +1,10 @@
+[Unit]
+Description=Ensure the ollama container is using the GPU (restart it if GPU discovery fell back to CPU)
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+# Installed by install-gpu-guard.sh; path is fixed so the unit doesn't depend on the repo checkout location.
+ExecStart=/usr/local/sbin/ollama-gpu-guard.sh
+TimeoutStartSec=30min

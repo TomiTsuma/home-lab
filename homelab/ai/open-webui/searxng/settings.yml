@@ -1,0 +1,59 @@
+# SearXNG config for Open WebUI's web search (internal-only; no host port is published).
+# Only overrides what differs from upstream defaults — see
+# https://docs.searxng.org/admin/settings/index.html
+use_default_settings:
+  engines:
+    # Keep a curated set. Tested 2026-11-21 from this host's public IP: the upstream default
+    # mix returned 0 results (duckduckgo serves a CAPTCHA/202 to this IP, "google cse" timed
+    # out). Left out: qwant ("access denied"), duckduckgo (CAPTCHA to this IP), brave
+    # (returned unusable "http:///go/v1/..." redirect URLs for ~75% of results).
+    keep_only:
+      - google
+      - bing
+      - startpage
+      - mojeek
+      - wikipedia
+      - github
+      - arxiv
+      - stackexchange
+
+general:
+  instance_name: "aeacus-search"
+
+server:
+  # Real value comes from the SEARXNG_SECRET env var (set in .env), which overrides this.
+  secret_key: "overridden-by-SEARXNG_SECRET-env"
+  # Bot limiter needs Redis/Valkey and is pointless for a single internal client.
+  limiter: false
+  image_proxy: false
+
+search:
+  safe_search: 0
+  # Open WebUI queries SearXNG's JSON API; html is kept for manual debugging.
+  formats:
+    - html
+    - json
+
+outgoing:
+  # Upstream default is 3s, too tight when ~10 engines are queried at once from a home link.
+  request_timeout: 6.0
+  max_request_timeout: 12.0
+
+# Make sure the curated engines are enabled even if upstream ships them disabled.
+engines:
+  - name: google
+    disabled: false
+  - name: bing
+    disabled: false
+  - name: startpage
+    disabled: false
+  - name: mojeek
+    disabled: false
+  - name: wikipedia
+    disabled: false
+  - name: github
+    disabled: false
+  - name: arxiv
+    disabled: false
+  - name: stackexchange
+    disabled: false

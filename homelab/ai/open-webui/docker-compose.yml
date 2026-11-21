@@ -23,6 +23,21 @@ services:
       # default 5m keep-alive means any gap in traffic longer than 5 minutes pays that
       # cost again on the next request. -1 = never unload.
       - OLLAMA_KEEP_ALIVE=-1
+      # Skip the Vulkan backend probe at startup. GPU discovery runs each backend probe under
+      # a 30s watchdog and this VM's disk is slow (shared HDD); every probe we skip is one
+      # less chance to time out and fall back to CPU. CUDA is what we use. (2026-11-21)
+      - OLLAMA_VULKAN=0
+      # Default is 4096 on GPUs <24 GiB VRAM. Web search results + tool schemas overflow 4k
+      # and Ollama truncates the prompt silently. 16k fits qwen3.5:9b fully in the 3060's
+      # 12 GB; 14B models at 16k are tight — lower per-model num_ctx in Open WebUI if needed.
+      - OLLAMA_CONTEXT_LENGTH=16384
+      # Default 5m is shorter than a cold model load from this VM's slow shared HDD (3-6 min
+      # measured), so switching to a not-yet-loaded model failed with "timed out waiting for
+      # llama-server to start" (seen with gemma4, 2026-11-21).
+      - OLLAMA_LOAD_TIMEOUT=15m
+    logging:
+      driver: json-file
+      options: { max-size: "20m", max-file: "3" }
     deploy:
       resources:
         reservations:
@@ -44,20 +59,89 @@ services:
     command: ["--config", "/app/config.yaml", "--port", "4000"]
 
   open-webui:
-    image: ghcr.io/open-webui/open-webui:main
+    # Pinned (2026-11-21). Was the floating :main tag (resolved to 0.6.41). Upgrades run one-way
+    # DB migrations: back up the open-webui volume first (see README "Upgrading").
+    image: ghcr.io/open-webui/open-webui:v0.13.4
     container_name: open-webui
     depends_on:
       - ollama
       - litellm
+      - mcp-tools
     restart: always
     ports:
+      # LAN + tailnet access on :3005 (owner's choice, 2026-11-21: briefly loopback/Tailscale-
+      # only, then reverted). Also served as HTTPS on https://aeacus-dl.tailaee7b8.ts.net via
+      # `tailscale serve --https=443` -> 127.0.0.1:3005. See README "Access".
       - "3005:8080"
     environment:
       # Container-to-container DNS name, not localhost/an external IP.
       - OLLAMA_HOST=http://ollama:11434
+      # Stable JWT signing key. Without it Open WebUI generates one inside the container
+      # filesystem (not the volume), so every container recreate logged everyone out.
+      - WEBUI_SECRET_KEY=${WEBUI_SECRET_KEY:?set WEBUI_SECRET_KEY in .env}
+      - WEBUI_URL=https://aeacus-dl.tailaee7b8.ts.net
+      # --- Memory + cross-chat reference (0.7.0+) -----------------------------------------
+      # With Function Calling = Native (default since 0.10), models get built-in tools
+      # add_memory/search_memories/update_memory and search_chats/view_chat. Background review
+      # additionally distils new memories from the conversation every N turns on its own.
+      - ENABLE_MEMORIES=true
+      - ENABLE_MEMORY_BACKGROUND_REVIEW=true
+      - MEMORIES_REVIEW_INTERVAL_TURNS=6
+      # --- Web search: Exa (2026-11-21, replaced the short-lived SearXNG setup) -----------
+      # PersistentConfig: env only seeds these while the DB has no value. Once changed in
+      # Admin -> Settings -> Web Search, the DB wins and these lines are ignored.
+      - ENABLE_WEB_SEARCH=true
+      - WEB_SEARCH_ENGINE=exa
+      - EXA_API_KEY=${EXA_API_KEY:?set EXA_API_KEY in .env}
+      - WEB_SEARCH_RESULT_COUNT=5
+      - WEB_SEARCH_CONCURRENT_REQUESTS=5
+      # --- MCP tool server (PersistentConfig too) ----------------------------------------
+      # auth_type=session: Open WebUI forwards the logged-in user's own JWT; mcp-tools
+      # verifies it against /api/v1/auths/ on every request (see mcp-tools/server.py).
+      # Default 10s. Open WebUI 0.13's MCP SDK 2.x first probes `server/discover` (new
+      # stateless protocol); mcp-tools (SDK 1.30) rejects it and the client falls back to the
+      # legacy initialize handshake. Under heavy disk I/O (e.g. a cold model load) probe +
+      # fallback exceeded 10s -> "Failed to connect to MCP server 'homelab'" (2026-11-21).
+      - MCP_INITIALIZE_TIMEOUT=30
+      - 'TOOL_SERVER_CONNECTIONS=[{"type":"mcp","url":"http://mcp-tools:8000/mcp","path":"","auth_type":"session","key":"","config":{"enable":true},"info":{"id":"homelab","name":"Homelab Tools","description":"Sandboxed shell/python, LlamaParse document extraction, scrape.do search/fetch, publish files to s3.ereuna.org"}}]'
     volumes:
       - open-webui:/app/backend/data
+
+  # MCP tool server (our own code, ./mcp-tools). Reachable ONLY from containers on this
+  # compose network — no `ports:` on purpose — and every request must carry a valid Open
+  # WebUI session token. Commands run as per-user unprivileged UIDs inside this container.
+  mcp-tools:
+    build: ./mcp-tools
+    image: homelab/mcp-tools:local
+    container_name: mcp-tools
+    restart: always
+    environment:
+      - OPENWEBUI_URL=http://open-webui:8080
+      - EXEC_ALLOWED_ROLES=admin
+      - LLAMA_CLOUD_API_KEY=${LLAMA_CLOUD_API_KEY:?set LLAMA_CLOUD_API_KEY in .env}
+      - SCRAPEDO_TOKEN=${SCRAPEDO_TOKEN:?set SCRAPEDO_TOKEN in .env}
+      - S3_ENDPOINT=s3.ereuna.org
+      - S3_SECURE=true
+      - S3_BUCKET=openwebui-files
+      - S3_ACCESS_KEY=${S3_ACCESS_KEY:?set S3_ACCESS_KEY in .env}
+      - S3_SECRET_KEY=${S3_SECRET_KEY:?set S3_SECRET_KEY in .env}
+      - PRESIGN_DEFAULT_HOURS=24
+    volumes:
+      - mcp-workspace:/workspace
+    # Least privilege: root in the container only to switch to per-user UIDs.
+    cap_drop: [ALL]
+    cap_add: [SETUID, SETGID, CHOWN, DAC_OVERRIDE, FOWNER, KILL]
+    security_opt: ["no-new-privileges:true"]
+    read_only: true
+    tmpfs: ["/tmp:size=512m"]
+    mem_limit: 4g
+    cpus: 4
+    pids_limit: 512
+    logging:
+      driver: json-file
+      options: { max-size: "20m", max-file: "3" }
 
 volumes:
   ollama:
   open-webui:
+  mcp-workspace:

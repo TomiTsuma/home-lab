@@ -1,0 +1,2953 @@
+"""
+title: Token Usage & Cost Display
+author: smetdenis
+author_url: https://github.com/SmetDenis
+git_url: https://github.com/SmetDenis/openwebui-token-usage-display.git
+version: 2.11.1
+license: MIT
+description: Shows token counts (input/output/total, running chat token total, reasoning, cached, audio), generation time, tokens/sec, native prefill tokens/sec, context-window utilization, a truncation marker when a response hits its output-token limit, message/chat cost and (opt-in) the remaining OpenRouter account balance below each AI response. The metric order, separator, icon style (emoji/simple/off), compact number format and a cost-display threshold are admin-configurable. Reads OWUI-normalized usage across providers (OpenAI Chat & Responses API, Anthropic, Gemini, Ollama, llama.cpp), falls back to tiktoken. Cost is native when the provider/proxy reports it (OpenRouter/LiteLLM), or optionally estimated from models.dev prices. Context sizes come first from the live window of a llama-swap / llama.cpp router reached through the model's own OWUI connection, then from what the serving backend lists for the model (llama.cpp, llama-swap, vLLM), then from an opt-in llama.cpp/llama-swap probe, an optional live models.dev fetch and a built-in table (seeded from models.dev). Workspace/custom ("agent") models resolve context and cost via their base model. Works on Open WebUI 0.9.0+ (built around the 0.10.x structured-output/normalized-usage model; degrades gracefully on 0.9.x). tiktoken is optional (soft import). With debug_mode, the diagnostic payload also carries the selected model/provider (sanitized, safe to share), a full cost breakdown with price provenance (incl. the provider's own cost_details when present), a web-search-usage hint, context-window provenance, and a valves snapshot.
+required_open_webui_version: 0.9.0
+"""  # noqa: D205, D212, D415, E501 - OWUI frontmatter: first line must be bare quotes, one `key: value` per line
+
+from __future__ import annotations
+
+# NOTE (0.9.0+ target, built around the 0.10.x/0.11.x model, verified against source):
+#   * OWUI runs `normalize_usage`/`merge_usage` on every usage-save path, so a
+#     saved `message["usage"]` carries input_tokens/output_tokens/total_tokens,
+#     while provider-native keys/detail dicts are preserved. Through 0.12.4 the
+#     triple was guaranteed (a missing counter became 0); since 0.12.5 a missing
+#     or invalid counter (negative, bool) is left out, and a streamed model call
+#     that reported no usage leaves `{"incomplete": True}` (merge_usage also sets
+#     `incomplete` on a turn where a call lacked input or output). A Responses API
+#     stream cut by the token limit did that until 0.13.0, which reads its usage.
+#     -> primary token read is the normalized triple; provider keys are backup;
+#     every read tolerates absence, and a usage with no counter is "no usage".
+#     `incomplete: true` beside counters (some call reported none) -> the token
+#     numbers are partial and render with ≈ (tokens["incomplete"]). merge_usage
+#     writes the key (True or False) on every merge of several calls, and no
+#     version before 0.12.5 writes it -> its presence also dates a summed cache.
+#   * `message["content"]` is NOT persisted at 0.10.x/0.11.x — both streaming and
+#     non-streaming save paths write only the structured `message["output"]`
+#     array. At 0.11.x the OUTLET BODY nonetheless carries a non-empty `content`:
+#     it is synthesized per message as `content or get_output_text(output)` while
+#     the body is assembled. -> tiktoken fallback reads content first (0.9.x and
+#     0.11.x outlet), then walks `output` (the only source on 0.10.x).
+#   * Only SAVED chats reload the active branch from the DB for outlet, so past
+#     messages carry their persisted `usage`. Unsaved chats (temporary:/local:/
+#     channel:, the 0.13.0 side chats, which are temporary:, and API requests with
+#     no chat_id) rebuild the history from the request as role+content only
+#     (0.11.x outlet_filter_handler) -> no per-message
+#     usage on past turns, so both chat totals (💰Σ cost, 🧮 tokens) collapse to
+#     the current message there. Nothing is shown at all for API requests with no
+#     chat_id (no event emitter) or in channel: chats (their emitter drops status
+#     and citation events) -> outlet returns early there (_can_show).
+#   * `message["info"]` is a redundant mirror ({"usage": ...}) of top-level usage
+#     on persisted chats -> intentionally ignored to avoid double counting.
+#   * Detail keys differ by API: Chat Completions -> prompt_tokens_details /
+#     completion_tokens_details; Responses API -> input_tokens_details /
+#     output_tokens_details; Anthropic -> top-level cache_read/creation (only
+#     from a pipe or a pass-through proxy: OWUI's own chat path calls an
+#     OpenAI-compatible /chat/completions even for api.anthropic.com). Since
+#     0.13.0 a non-streaming Responses reply carries both families (the input_*/
+#     output_* keys copied to prompt_*/completion_*) -> every reader takes the
+#     first family that has a value, never both, so nothing is counted twice.
+#   * merge_usage sums input/output/total + top-level cost (USAGE_COST_KEYS) +
+#     *_tokens_details, but NOT Ollama/llama.cpp durations, nor (through 0.12.4)
+#     the top-level Anthropic cache fields -> in multi-round tool turns the token
+#     totals AND the native cost cover the whole turn (every LLM round-trip is
+#     summed), while timing reflects the last round only (an OWUI limitation we
+#     surface, not fix). Since 0.12.5 cache_read/cache_creation_input_tokens are
+#     summed too, so Anthropic-native cache covers the whole turn like input does.
+#     Since 0.12.5 merge_usage also runs only ACROSS model calls: usage chunks
+#     within one call are snapshots (update_usage_snapshot), no longer summed.
+#     -> the displayed 💰 already covers Open-WebUI-orchestrated tool/MCP calls;
+#     what it can't see is a surcharge the provider never puts in usage.cost
+#     (e.g. an OpenRouter BYOK web-search engine billed outside the generation).
+#   * Since 0.11.0 merge_usage rewrites prompt_tokens/completion_tokens from the
+#     LAST round (0.10.x summed them like input/output; 0.12.5 takes them from
+#     that round's input/output_tokens) -> the 📐 "used" side reads them, so a
+#     tool turn shows the last request, not the sum of rounds; on 0.10.x it stays
+#     the summed total (_last_round_context). On 0.12.5+ the Anthropic-native
+#     cache added back to that pair is the turn's sum, and no per-call value
+#     reaches the outlet -> 📐 adds the per-call average instead, the calls
+#     counted by the `request` hook (0.11.2+), and is marked ≈.
+#   * The `request` filter hook (0.11.2+) runs right before every model call,
+#     after RAG/web search, with the outlet's own __metadata__ dict -> it stamps
+#     the first call (the wall-clock start) and counts the calls. Older OWUI never
+#     calls it: the inlet stamp and no count remain.
+#   * Prefill (v2.11.0; verified against OWUI v0.13.0 and v0.13.3): `stream`
+#     runs BEFORE usage capture/normalization. Its __metadata__ is the same dict
+#     passed to `request` and outlet (process_chat_payload returns it unchanged,
+#     main builds the response ctx from it). `request` clears _tud_prefill before
+#     EACH call, even if that call later emits no usage. `stream` records only
+#     native vLLM count/time there; event/usage stay byte-for-byte unchanged, so
+#     no custom usage fields reach stored chats, tooltips or raw-API clients.
+#     A stream exception makes OWUI drop the chunk -> stream must catch errors
+#     and return the original event. llama.cpp prompt_n already excludes cache_n.
+#     Ollama prompt_eval_count includes cache hits, but OWUI drops the cached
+#     count and computes prompt_token/s with the inflated numerator -> do NOT
+#     display Ollama prefill rates. See docs/owui-map.md for the call sites.
+#   * Since 0.12.0 the current outlet message carries `finish_reason` — the
+#     value from the LAST model call of the turn, never persisted. Provider-real
+#     for Chat Completions, Ollama, pipes passing an upstream response through and
+#     (since 0.13.0, from the response status) non-streaming Responses API;
+#     synthesized "stop"/"tool_calls" (never "length") for other pipes and, before
+#     0.13.0, non-streaming Responses API. Responses API streams: absent before
+#     0.13.1; since then OWUI's own "incomplete" (the stream ended on
+#     response.incomplete / response.failed / error - token limit, content filter
+#     or a failure, not told apart) or the final status ("completed"). Absence
+#     means "unknown", not "stop"; "length" and "incomplete" are shown (✂️, _render_finish).
+#   * 0.9.0+ compatible: the outlet body carries per-message `usage` since 0.9.0 and
+#     normalize_usage exists since 0.8.0, so tokens/context/timing/estimate all work on
+#     0.9.x. Only NATIVE provider cost (USAGE_COST_KEYS) needs 0.10.0+ -> on 0.9.x use
+#     cost_mode 'estimate'. Verified via git history, not a live 0.9.x run.
+
+# tiktoken is optional: OWUI bundles it, but per-plugin `requirements:` installs
+# fail in some sandboxes (uvx/LXC). Soft-import so the plugin always loads.
+try:
+    import tiktoken
+
+    _TIKTOKEN_AVAILABLE = True  # pragma: no cover - only reached when tiktoken is installed
+# A broken optional install (not only a missing one) must never stop the plugin from loading.
+except Exception:  # noqa: BLE001  # pragma: no cover - environment dependent
+    tiktoken = None
+    _TIKTOKEN_AVAILABLE = False
+
+# aiohttp is bundled with OWUI; soft-imported only for the optional context probe.
+try:
+    import aiohttp
+
+    _AIOHTTP_AVAILABLE = True  # pragma: no cover - only reached when aiohttp is installed
+except Exception:  # noqa: BLE001  # pragma: no cover - same load-must-not-fail rule as tiktoken
+    aiohttp = None
+    _AIOHTTP_AVAILABLE = False
+
+import json
+import math
+import re
+import time
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Literal
+from urllib.parse import quote
+
+from pydantic import BaseModel, Field
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
+# --- Module-level state --------------------------------------------------------
+
+# Request start times keyed by chat context (wall-clock fallback timing).
+_request_timings: dict[str, float] = {}
+
+# Context-window size cache: model_key -> (size, expiry_epoch, provenance).
+_ctx_size_cache: dict[str, tuple[int, float, dict[str, Any]]] = {}
+
+# Cached models.dev lookup table (id -> context tokens): {"map": dict|None, "expiry": epoch, "status": str,
+# "fetched_at": epoch|None}; status and fetched_at describe the last fetch, for the debug payload.
+_modelsdev_cache: dict[str, Any] = {"map": None, "expiry": 0.0, "status": "not_fetched", "fetched_at": None}
+
+# Cached models.dev price map (id -> {input,output,cache_read,cache_write} USD/1M), same shape as above.
+_modelsdev_prices_cache: dict[str, Any] = {"map": None, "expiry": 0.0, "status": "not_fetched", "fetched_at": None}
+
+# Static context-window table — offline default, seeded from models.dev (2026-07), refreshed before every
+# release from the report of scripts/refresh_tables.py (last: 2026-11). Hand-written on purpose: family keys
+# keep older and future members covered. Matched as a case-insensitive substring of the model id; the
+# LONGEST matching key wins, so specific keys (gpt-4o) override generic ones (gpt-4). Enable the
+# `fetch_context_from_modelsdev` valve for always-current sizes across every model.
+_STATIC_CONTEXT_SIZES: dict[str, int] = {
+    # --- OpenAI ---
+    "gpt-6": 1050000,
+    "gpt-daybreak-blue": 1050000,
+    "gpt-daybreak-red": 400000,
+    "gpt-realtime": 128000,
+    "gpt-5.6": 1050000,
+    "gpt-5.5": 1050000,
+    "gpt-5.4-mini": 400000,
+    "gpt-5.4-nano": 400000,
+    "gpt-5.4": 1050000,
+    "gpt-5.3-codex-spark": 128000,
+    "gpt-5": 400000,
+    "gpt-4.1": 1047576,
+    "gpt-4o": 128000,
+    "gpt-4-turbo": 128000,
+    "gpt-4": 8192,
+    "gpt-3.5": 16385,
+    "o4-mini": 200000,
+    "o3": 200000,
+    "o1": 200000,
+    # --- Anthropic (Opus 4.6+/Sonnet 5 moved to 1M) ---
+    "claude-opus-5": 1000000,
+    "claude-haiku-5": 1000000,
+    "claude-opus-4-8": 1000000,
+    "claude-opus-4-7": 1000000,
+    "claude-opus-4-6": 1000000,
+    "claude-sonnet-5": 1000000,
+    "claude-sonnet-4-6": 1000000,
+    "claude-fable-5": 1000000,
+    "claude": 200000,
+    # --- Google Gemini (3.x is the current generation) ---
+    "gemini-3.5": 1048576,
+    "gemini-3.1": 1048576,
+    "gemini-3": 1048576,
+    "gemini-2.5": 1048576,
+    "gemini-2.0": 1048576,
+    "gemini-1.5-pro": 2097152,
+    "gemini-1.5": 1048576,
+    "gemini": 1048576,
+    # --- Meta Llama ---
+    "llama-4-scout": 3500000,
+    "llama-4": 1000000,
+    "llama-3.3": 128000,
+    "llama-3.1": 128000,
+    "llama-3": 128000,
+    "llama": 8192,
+    # --- DeepSeek ---
+    "deepseek-r1": 128000,
+    "deepseek-reasoner": 1000000,
+    "deepseek-chat": 1000000,
+    "deepseek-v4": 1048576,
+    "deepseek-flash": 1048576,
+    "deepseek": 128000,
+    # --- xAI Grok ---
+    "grok-4.7": 500000,
+    "grok-4.6": 500000,
+    "grok-4.5": 500000,
+    "grok-4": 1000000,
+    "grok-3": 131072,
+    "grok": 256000,
+    # --- Mistral ---
+    "mistral-large-4": 1048576,
+    "mistral-large": 262144,
+    "mistral-medium": 262144,
+    "mistral-small": 262144,
+    "ministral-3b": 131072,
+    "ministral": 262144,
+    "voxtral": 32768,
+    "codestral": 256000,
+    "devstral": 262144,
+    "magistral": 128000,
+    "mistral-nemo": 128000,
+    "pixtral": 128000,
+    "mistral": 32768,
+    # --- Alibaba Qwen (the proprietary flash/plus/max lines are 1M; open weights vary by host) ---
+    "qwen3.8-omni-flash": 1000000,
+    "qwen3.8-flash": 1000000,
+    "qwen3.8-max": 1000000,
+    "qwen3.7-flash": 1000000,
+    "qwen3.7-plus": 1000000,
+    "qwen3.7-max": 1000000,
+    "qwen3.6-flash": 1000000,
+    "qwen3.6-plus": 1000000,
+    "qwen3.6": 262144,
+    "qwen3.5-flash": 1000000,
+    "qwen3.5-plus": 1000000,
+    "qwen3.5": 262144,
+    "qwen3-coder-flash": 1000000,
+    "qwen3-vl-plus": 262144,
+    "qwen-flash": 1000000,
+    "qwen-plus": 1000000,
+    "qwen3-coder": 262144,
+    "qwen3-max": 262144,
+    "qwen3": 131072,
+    "qwq": 131072,
+    "qwen2.5": 128000,
+    "qwen": 32768,
+    # --- Moonshot Kimi ---
+    "kimi-k3": 1048576,
+    "kimi-k2": 262144,
+    "kimi": 200000,
+    # --- Zhipu GLM ---
+    "glm-5.3": 1000000,
+    "glm-5-3": 1048576,  # Mistral's id for it (zai-glm-5-3)
+    "glm-5.2": 1000000,
+    "glm-5.1": 200000,
+    "glm-5": 204800,
+    "glm-4.6v": 128000,
+    "glm-4.5v": 64000,
+    "glm-4.7": 204800,
+    "glm-4.6": 204800,
+    "glm-4.5": 131072,
+    "glm": 131072,
+    # --- MiniMax ---
+    "minimax-m3": 1000000,
+    "minimax": 204800,
+    # --- Cohere Command ---
+    "command-a-plus": 128000,
+    "command-a-vision": 128000,
+    "command-a-translate": 8000,
+    "command-a": 256000,
+    "command-r": 128000,
+    "command": 128000,
+}
+
+# Static price table — offline fallback for cost estimation in `estimate` mode (USD per 1M tokens), used
+# only when the price_map valve and live models.dev have no price. Matched by the exact model id, else the
+# id without a provider prefix (_price_key) — never by substring: a related id (deepseek-v4-1-flash vs
+# deepseek-v4) is a different tariff, so an unknown model gets no price instead of a wrong one (issue #49).
+# Generated by scripts/refresh_tables.py from models.dev before every release; never edit by hand. It holds
+# the models the vendors themselves sell (first-party providers, so no reseller prices and no free local
+# hosts) that came out in the last 4 months and are not deprecated: older models are priced by models.dev
+# or price_map. Rates are models.dev's base tier (long-context tiers are not modelled) and its own
+# cache_read/cache_write fields; an id several vendors list keeps the first vendor's price.
+# BEGIN generated static prices
+# models.dev https://models.dev/api.json of 2026-11-12: 42 models released on or after 2026-07-12.
+_STATIC_PRICES: dict[str, dict[str, float]] = {
+    # --- openai ---
+    "gpt-6-astra": {"input": 10.0, "output": 50.0, "cache_read": 1.0, "cache_write": 12.5},
+    "gpt-6-luna": {"input": 0.1, "output": 0.5, "cache_read": 0.01, "cache_write": 0.125},
+    "gpt-6-sol": {"input": 2.0, "output": 10.0, "cache_read": 0.2, "cache_write": 2.5},
+    "gpt-6.1-sol": {"input": 2.0, "output": 10.0, "cache_read": 0.1, "cache_write": 2.5},
+    "gpt-6.1-terra": {"input": 1.0, "output": 5.0, "cache_read": 0.05, "cache_write": 1.25},
+    "gpt-daybreak-blue-latest": {"input": 4.0, "output": 20.0, "cache_read": 0.4, "cache_write": 5.0},
+    "gpt-daybreak-red-latest": {"input": 12.5, "output": 75.0, "cache_read": 1.25, "cache_write": 15.625},
+    # --- anthropic ---
+    "claude-fable-5-1": {"input": 10.0, "output": 50.0, "cache_read": 0.25, "cache_write": 12.5},
+    "claude-fable-5-2": {"input": 8.0, "output": 40.0, "cache_read": 0.2, "cache_write": 10.0},
+    "claude-haiku-5-5": {"input": 0.1, "output": 0.5, "cache_read": 0.01, "cache_write": 0.125},
+    "claude-opus-5": {"input": 5.0, "output": 25.0, "cache_read": 0.5, "cache_write": 6.25},
+    "claude-opus-5-5": {"input": 4.0, "output": 20.0, "cache_read": 0.2, "cache_write": 5.0},
+    "claude-sonnet-5-5": {"input": 2.0, "output": 10.0, "cache_read": 0.1, "cache_write": 2.5},
+    # --- google ---
+    "gemini-3.5-flash-lite": {"input": 0.3, "output": 2.5, "cache_read": 0.03},
+    "gemini-3.6-flash": {"input": 0.75, "output": 3.75, "cache_read": 0.075},
+    "gemini-3.7-flash": {"input": 0.75, "output": 3.75, "cache_read": 0.075},
+    "gemini-3.8-flash": {"input": 0.75, "output": 3.75, "cache_read": 0.075},
+    "gemini-4-argon": {"input": 2.0, "output": 10.0, "cache_read": 0.1},
+    "gemini-4-carbon": {"input": 2.0, "output": 10.0, "cache_read": 0.1},
+    "gemini-flash-latest": {"input": 0.75, "output": 3.75, "cache_read": 0.075},
+    "gemini-flash-lite-latest": {"input": 0.3, "output": 2.5, "cache_read": 0.03},
+    # --- deepseek ---
+    "deepseek-flash": {"input": 0.15, "output": 0.6, "cache_read": 0.003},
+    "deepseek-v4-pro": {"input": 0.66, "output": 1.98, "cache_read": 0.022},
+    # --- xai ---
+    "grok-4.6": {"input": 2.0, "output": 6.0, "cache_read": 0.5},
+    "grok-4.7": {"input": 2.0, "output": 6.0, "cache_read": 0.5},
+    # --- moonshotai ---
+    "kimi-k3": {"input": 3.0, "output": 15.0, "cache_read": 0.3, "cache_write": 3.0},
+    "kimi-k3.1-pro": {"input": 2.0, "output": 10.0, "cache_read": 0.2, "cache_write": 2.0},
+    "kimi-k3.1-pro-highspeed": {"input": 4.0, "output": 20.0, "cache_read": 0.2, "cache_write": 4.0},
+    # --- zai ---
+    "glm-5.3": {"input": 1.4, "output": 4.4, "cache_read": 0.26},
+    "glm-5.3-flash": {"input": 0.15, "output": 0.5, "cache_read": 0.03},
+    "glm-5.3-flashx": {"input": 0.37, "output": 1.25, "cache_read": 0.075},
+    # --- minimax ---
+    "minimax-m3.1-flash": {"input": 0.15, "output": 0.6, "cache_read": 0.015},
+    # --- mistral ---
+    "deepseek-v4-1-flash-1017": {"input": 0.3, "output": 1.2, "cache_read": 0.007},
+    "mistral-large-4": {"input": 0.7, "output": 2.1, "cache_read": 0.07},
+    "mistral-large-4-0-8": {"input": 0.7, "output": 2.1, "cache_read": 0.07},
+    "zai-glm-5-3": {"input": 1.4, "output": 4.4, "cache_read": 0.14},
+    "zai-glm-5-3-flash": {"input": 0.15, "output": 0.5, "cache_read": 0.03},
+    # --- alibaba ---
+    "deepseek-v4-flash-0731": {"input": 0.44, "output": 1.32, "cache_read": 0.088},
+    "qwen3.7-flash": {"input": 0.03, "output": 0.13, "cache_read": 0.006, "cache_write": 0.0375},
+    "qwen3.8-flash": {"input": 0.15, "output": 0.47, "cache_read": 0.016, "cache_write": 0.2},
+    "qwen3.8-max": {"input": 2.0, "output": 6.0, "cache_read": 0.25, "cache_write": 2.5},
+    "qwen3.8-omni-flash": {"input": 0.15, "output": 0.47, "cache_read": 0.016},
+}
+# END generated static prices
+
+
+# --- Helpers -------------------------------------------------------------------
+
+
+def _num(value: object) -> int | float | None:
+    """Return the value if it is a real, finite (non-bool) number, else None.
+
+    NaN/±inf are rejected at this single intake: Python's json accepts them, and one would crash
+    the int() in _compute_total (or poison every sum) on the unguarded token path of outlet.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and math.isfinite(value):
+        return value
+    return None
+
+
+def _first_num(src: object, *keys: str) -> int | float | None:
+    """First present numeric value among keys (0 is valid, unlike `or`-chains)."""
+    if not isinstance(src, dict):
+        return None
+    for key in keys:
+        val = _num(src.get(key))
+        if val is not None:
+            return val
+    return None
+
+
+def _detail_num(usage: object, group: str, key: str) -> int | float | None:
+    """Read usage[group][key] as a number (e.g. completion_tokens_details.reasoning_tokens)."""
+    if not isinstance(usage, dict):
+        return None
+    group_dict = usage.get(group)
+    if isinstance(group_dict, dict):
+        return _num(group_dict.get(key))
+    return None
+
+
+def _get_last_assistant_message_obj(messages: list[Any]) -> dict[str, Any]:
+    """Return the last assistant message dict from the message list."""
+    for message in reversed(messages):
+        if isinstance(message, dict) and message.get("role") == "assistant":
+            return message
+    return {}
+
+
+def _extract_output_text(output: object) -> str:
+    """Concatenate visible assistant text from a structured `output` array.
+
+    Mirrors OWUI's own convert_output_to_messages: only `message` items and their
+    `output_text` parts are visible text. Reasoning items are excluded (they are
+    counted separately as reasoning tokens and are often hidden by the provider).
+    """
+    if not isinstance(output, list):
+        return ""
+    parts: list[str] = []
+    for item in output:
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") != "message":
+            continue
+        for part in item.get("content", []) or []:
+            if isinstance(part, dict) and part.get("type") == "output_text":
+                text = part.get("text", "")
+                if text:
+                    parts.append(text if isinstance(text, str) else str(text))
+    return "".join(parts)
+
+
+def _message_text(message: dict[str, Any]) -> str:
+    """Best-effort visible text of a message: content if present, else output."""
+    content = message.get("content", "")
+    if isinstance(content, str) and content:
+        return content
+    if isinstance(content, list):
+        chunks: list[str] = []
+        for item in content:
+            if isinstance(item, dict) and item.get("type") == "text":
+                chunks.append(item.get("text", ""))
+            elif isinstance(item, str):
+                chunks.append(item)
+        if chunks:
+            return " ".join(c for c in chunks if c)
+    # Streaming assistant messages keep their text only in `output`.
+    return _extract_output_text(message.get("output", []))
+
+
+def _count_tokens_tiktoken(text: str, model: str = "") -> int | None:
+    """Estimate token count with tiktoken. Returns None if tiktoken is unavailable."""
+    if not _TIKTOKEN_AVAILABLE or not text:
+        return None if not _TIKTOKEN_AVAILABLE else 0
+    try:
+        encoding = tiktoken.encoding_for_model(model)
+    except (KeyError, ValueError):
+        encoding = tiktoken.get_encoding("cl100k_base")
+    return len(encoding.encode(text))
+
+
+_SECONDS_PER_MINUTE = 60
+_THOUSAND = 1_000
+_MILLION = 1_000_000
+_MIN_SHOWN_USD = 0.0001  # smallest amount _format_cost prints exactly; anything below reads "<$0.0001"
+_COST_EQUAL_EPSILON = 1e-9  # float tolerance when deduping the chat cost total against the message cost
+_PRICE_FIELDS = ("input", "output", "cache_read", "cache_write")  # per-1M rates read from a price entry
+_PRICE_PREFIX_CUT = re.compile(r"/|\.(?=[a-z])")  # where _price_key cuts a provider prefix off a model id
+# models.dev api.json is ~6 MB (2026-11), 12x models.json: a 5 s total cut it off on a link that still fetched
+# models.json (issue #49). The download may take 30 s (once per TTL, after the reply is on screen), but
+# connecting (DNS, TCP, TLS) only 5 s, so a firewall that drops packets fails as fast as before on every retry.
+_MODELSDEV_TIMEOUT_S = 30
+_MODELSDEV_CONNECT_TIMEOUT_S = 5
+_HTTP_ERROR = 400  # the first HTTP status that is not a usable answer
+# The only place an OpenRouter key is ever sent, whichever connection or valve it came from.
+_OPENROUTER_CREDITS_URL = "https://openrouter.ai/api/v1/credits"
+_ERROR_MESSAGE_CHARS = 200  # an upstream error message is cut to this length in the debug payload
+
+
+def _format_duration(seconds: float) -> str:
+    """Human-friendly elapsed time."""
+    if seconds < 1.0:
+        return f"{seconds * 1000:.0f}ms"
+    if seconds < _SECONDS_PER_MINUTE:
+        return f"{seconds:.1f}s"
+    minutes = int(seconds // _SECONDS_PER_MINUTE)
+    secs = seconds % _SECONDS_PER_MINUTE
+    return f"{minutes}m {secs:.0f}s"
+
+
+def _format_k(n: float) -> str:
+    """Compact k/M token formatting for context display (e.g. 3.5k, 1.0M)."""
+    if n >= _MILLION:
+        return f"{n / _MILLION:.1f}M"
+    if n >= _THOUSAND:
+        return f"{n / _THOUSAND:.1f}k"
+    return f"{int(n)}"
+
+
+def _format_cost(usd: float) -> str:
+    """USD with precision scaled to magnitude (e.g. $1.23, $0.0123, <$0.0001)."""
+    if usd <= 0:
+        return "$0.00"
+    if usd < _MIN_SHOWN_USD:
+        return "<$0.0001"
+    if usd < 1:
+        return f"${usd:.4f}"
+    return f"${usd:,.2f}"
+
+
+def _url_host(url: str) -> str:
+    """Best-effort lowercased host from an http(s) URL (stdlib `re`, no extra import)."""
+    m = re.match(r"https?://([^/?#]+)", url.strip())
+    return m.group(1).lower() if m else ""
+
+
+async def _fetch_modelsdev(url: str) -> tuple[object, str]:
+    """GET a models.dev file as JSON: (data, "ok"), else (None, why) — never raises.
+
+    The reason (`aiohttp_unavailable`, `http <code>`, `error: <ExceptionType>`) goes to the debug
+    payload: a failed fetch otherwise looks exactly like a model models.dev does not list (issue #49).
+    """
+    if not _AIOHTTP_AVAILABLE:
+        return None, "aiohttp_unavailable"
+    try:
+        async with (
+            aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=_MODELSDEV_TIMEOUT_S, connect=_MODELSDEV_CONNECT_TIMEOUT_S)
+            ) as session,
+            session.get(url) as resp,
+        ):
+            if resp.status >= _HTTP_ERROR:
+                return None, f"http {resp.status}"
+            return await resp.json(content_type=None), "ok"
+    except Exception as exc:  # noqa: BLE001 - optional network fetch: any failure means "no live data"
+        return None, f"error: {type(exc).__name__}"
+
+
+def _modelsdev_status(cache: dict[str, Any]) -> dict[str, Any]:
+    """Debug view of a models.dev cache: last fetch status, entry count and age in seconds."""
+    fetched_at = cache.get("fetched_at")
+    table = cache.get("map")
+    return {
+        "status": cache.get("status"),
+        "entries": len(table) if isinstance(table, dict) else None,
+        "age_s": round(time.time() - fetched_at) if fetched_at else None,
+    }
+
+
+def _longest_key_match(table: dict[str, Any], model_id: str) -> str | None:
+    """Longest case-insensitive substring key of `table` contained in `model_id`, else None.
+
+    The substring lookup of the context-size tables and of the admin's own maps (context_size_map,
+    price_map): specific keys (gpt-4o) beat generic ones (gpt-4). Empty keys are ignored. Built-in and
+    live prices use the exact _price_key instead.
+    """
+    if not isinstance(table, dict) or not table:
+        return None
+    mid = (model_id or "").lower()
+    if not mid:
+        return None
+    for key in sorted(table, key=len, reverse=True):
+        if key and key in mid:
+            return key
+    return None
+
+
+def _price_key(table: dict[str, Any], model_id: str) -> str | None:
+    """Key of a price table for `model_id`: the id itself, else the id without a provider prefix, else None.
+
+    Prefixes are cut one at a time from the left at `/` (org/model) and at a `.` that is followed by a
+    letter (an OWUI connection prefix_id, a vendor or a cloud region: openai.gpt-6.1-terra,
+    au.anthropic.claude-opus-4-8), so a version dot (gpt-6.1, qwen3.8) is never a cut. Never a substring
+    or family match: a related id (deepseek-v4-1-flash vs deepseek-v4, claude-opus-4-8-fast vs
+    claude-opus-4-8) is a different tariff, so an unknown or dated id gets no price rather than a
+    wrong one (issue #49). The admin's price_map keeps substring matching (_longest_key_match).
+    """
+    if not isinstance(table, dict) or not table:
+        return None
+    mid = (model_id or "").lower()
+    while mid:
+        if mid in table:
+            return mid
+        cut = _PRICE_PREFIX_CUT.search(mid)
+        if cut is None:
+            return None
+        mid = mid[cut.end() :]
+    return None
+
+
+def _modelsdev_match(table: dict[str, Any], model_id: str) -> str | None:
+    """models.dev context key matching `model_id`: exact -> bare (last path segment) -> longest substring."""
+    if not isinstance(table, dict) or not table:
+        return None
+    mid = (model_id or "").lower()
+    if mid in table:
+        return mid
+    bare = mid.split("/")[-1]
+    if bare in table:
+        return bare
+    return _longest_key_match(table, model_id)
+
+
+def _match_running(found: list[tuple[list[str], int]], model_id: str) -> tuple[int, str | None] | None:
+    """Pick the called model's context size from a local backend's list of (ids, size) rows.
+
+    Returns (size, matched id) when a row id equals `model_id` or is its suffix after an OWUI
+    connection prefix (`prefix.id`, routers/openai.py) or a path (`org/id`), (size, None) when there
+    is exactly one row that does not match (an OWUI alias may legitimately differ), and None
+    otherwise. No loose substring match: a matched row outranks the tables, so a local `qwen` must
+    not claim a cloud `qwen3-max`. The caller ranks an unmatched row below the tables.
+    """
+    mid = (model_id or "").lower()
+    by_id = {rid.lower(): size for ids, size in found for rid in ids if rid}
+    for key in sorted(by_id, key=len, reverse=True):
+        if mid == key or mid.endswith(("." + key, "/" + key)):
+            return by_id[key], key
+    if len(found) == 1:
+        return found[0][1], None
+    return None
+
+
+def _advertised_context(entry: object) -> tuple[int, str] | None:
+    """Context size a local backend reports for a model in its own /v1/models listing, else None.
+
+    OWUI keeps each OpenAI-connection model's raw listing row both under `openai` and spread at the
+    top level of the model dict (routers/openai.py). llama.cpp (since May 2026) and llama-swap (with
+    a capabilities context) put the running window in `meta.n_ctx`, vLLM in `max_model_len`. These
+    are the server's actual limits, unlike a model's trained maximum. Non-positive values (llama.cpp
+    router mode reports 0 for an unloaded model) are ignored.
+    """
+    if not isinstance(entry, dict):
+        return None
+    for src in (entry.get("openai"), entry):
+        if not isinstance(src, dict):
+            continue
+        meta = src.get("meta")
+        n_ctx = _num(meta.get("n_ctx")) if isinstance(meta, dict) else None
+        if n_ctx is not None and n_ctx > 0:
+            return int(n_ctx), "meta.n_ctx"
+        max_len = _num(src.get("max_model_len"))
+        if max_len is not None and max_len > 0:
+            return int(max_len), "max_model_len"
+    return None
+
+
+def _live_backend(entry: object) -> tuple[str, str] | None:
+    """(kind, listed model id) when the model is served by a backend that can be asked for its live window.
+
+    Detected from the raw /v1/models row OWUI keeps under `openai`, so a cloud connection is never
+    probed: llama-swap marks its rows `owned_by: llama-swap` (an alias row names its real model in
+    `meta.llamaswap.modelID`; peer and selector rows are skipped), a llama.cpp router marks them
+    `owned_by: llamacpp` plus a `status` block that a single llama-server row lacks. A plain
+    llama-server already lists its running `meta.n_ctx`, read by _advertised_context. The id may
+    still carry the OWUI connection prefix. A connection restricted to hand-typed model ids has no
+    row to read, so it is not detected.
+    """
+    row = entry.get("openai") if isinstance(entry, dict) else None
+    if not isinstance(row, dict):
+        return None
+    row_id = row.get("id")
+    if not isinstance(row_id, str) or not row_id:
+        return None
+    if row.get("owned_by") == "llama-swap":
+        meta = row.get("meta")
+        swap = meta.get("llamaswap") if isinstance(meta, dict) else None
+        kind = swap.get("type") if isinstance(swap, dict) else None
+        if kind == "alias" and isinstance(swap, dict) and isinstance(swap.get("modelID"), str) and swap["modelID"]:
+            return "llama-swap", swap["modelID"]
+        return ("llama-swap", row_id) if kind in (None, "model") else None
+    if row.get("owned_by") == "llamacpp" and isinstance(row.get("status"), dict):
+        return "llamacpp-router", row_id
+    return None
+
+
+def _props_n_ctx(data: object) -> int | None:
+    """Positive n_ctx from a llama.cpp /props payload (top level or its generation settings), else None."""
+    if not isinstance(data, dict):
+        return None
+    n_ctx = _first_num(data, "n_ctx") or _first_num(data.get("default_generation_settings"), "n_ctx")
+    return int(n_ctx) if n_ctx and n_ctx > 0 else None
+
+
+def _llama_swap_ready_id(data: object, model_id: str) -> str | None:
+    """Id of the llama-swap /running row that is the called model and fully loaded, else None.
+
+    Matching mirrors _match_running (exact, `prefix.id`, `org/id`), but only a `ready` row counts:
+    a model-dispatched request such as /props?model= makes llama-swap start a model that is not
+    running, evicting whatever is, and a stats probe must never do that. The row id keeps its case
+    because llama-swap resolves model ids case-sensitively.
+    """
+    rows = data.get("running") if isinstance(data, dict) else None
+    mid = (model_id or "").lower()
+    best: str | None = None
+    for row in rows if isinstance(rows, list) else []:
+        rid = row.get("model") if isinstance(row, dict) else None
+        if not isinstance(rid, str) or not rid or row.get("state") != "ready":
+            continue
+        key = rid.lower()
+        if (mid == key or mid.endswith(("." + key, "/" + key))) and (best is None or len(rid) > len(best)):
+            best = rid
+    return best
+
+
+def _resolve_model_id(model: dict[str, Any] | None, body: dict[str, Any] | None = None) -> str:
+    """Model id used for provider-table matching (context size, price, tiktoken).
+
+    Prefers a workspace model's `info.base_model_id` — the real underlying LLM — over the
+    top-level `id`, which for a custom/agent model is an arbitrary user label (e.g. "research")
+    that carries no provider token and so never matches the context/price tables. This mirrors
+    what OWUI itself does (it swaps in base_model_id for the actual LLM call) and what the
+    model-name metric already displays, so one map entry keyed on the base model covers every
+    agent built on it. Falls back to the top-level id, then body["model"], then "".
+    """
+    if isinstance(model, dict):
+        info = model.get("info")
+        base = info.get("base_model_id") if isinstance(info, dict) else None
+        if base:
+            return str(base)
+        mid = model.get("id", "") or ""
+        if mid:
+            return str(mid)
+    if isinstance(body, dict):
+        return body.get("model", "") or ""
+    return ""
+
+
+# --- stats-line order (see configurable-order design doc) ----------------------
+
+# The 16 metric keys in their default display order (identical to the historical
+# hard-coded order of _build_stats). Registry populated in the renderers section.
+# `finish` sits right after `output`: the status line is clamped to one line, so a
+# warning at the end could be cut off on a narrow screen. `balance` follows the costs.
+_DEFAULT_ORDER: list[str] = [
+    "input",
+    "output",
+    "finish",
+    "total",
+    "tokens_total",
+    "reasoning",
+    "cached",
+    "audio",
+    "context",
+    "time",
+    "prefill",
+    "tps",
+    "cost",
+    "cost_total",
+    "balance",
+    "model",
+    "source",
+]
+_STATS_KEYS: frozenset[str] = frozenset(_DEFAULT_ORDER)
+
+
+def _normalize_order(order_str: str) -> tuple[list[str], list[str]]:
+    """Split a comma-separated order string into (valid_keys_deduped, ignored_unknown).
+
+    Case-insensitive, whitespace-tolerant, order-preserving; blanks are skipped.
+    """
+    valid: list[str] = []
+    unknown: list[str] = []
+    for raw in (order_str or "").split(","):
+        key = raw.strip().lower()
+        if not key:
+            continue
+        if key in _STATS_KEYS:
+            if key not in valid:
+                valid.append(key)
+        elif key not in unknown:
+            unknown.append(key)
+    return valid, unknown
+
+
+def _resolve_display_order(admin_order: str) -> list[str]:
+    """Resolve the admin-configured metric order, else the default.
+
+    Returns a permutation of all metric keys: the parsed (valid) keys first, then the
+    remaining keys in default order. Empty input -> _DEFAULT_ORDER unchanged.
+    """
+    valid, _ = _normalize_order(admin_order)
+    return valid + [k for k in _DEFAULT_ORDER if k not in valid]
+
+
+def _display_order_debug(admin_order: str) -> dict[str, Any]:
+    """Provenance of the resolved order for the debug payload (debug_mode only)."""
+    au = (admin_order or "").strip()
+    source, order_str = ("admin", au) if au else ("default", "")
+    valid, unknown = _normalize_order(order_str)
+    resolved = valid + [k for k in _DEFAULT_ORDER if k not in valid]
+    return {
+        "source": source,
+        "admin_order": admin_order,
+        "parsed": valid,
+        "ignored_unknown": unknown,
+        "resolved": resolved,
+    }
+
+
+# --- icons & number formatting (icon_style / compact_numbers) ------------------
+# Icons are kept OUT of the renderer bodies so a single icon_style switch can swap
+# the whole set. `off` yields "" (bare value); `simple` is monochrome unicode.
+_ICON_EMOJI: dict[str, str] = {
+    "input": "⬆︎",
+    "output": "⬇︎",
+    "finish": "✂️",
+    "total": "Σ",
+    "tokens_total": "🧮",
+    "reasoning": "🧠",
+    "cached": "💾",
+    "audio": "🔊",
+    "time": "⏱",
+    "prefill": "⏩",
+    "tps": "⚡",
+    "cost": "💰",
+    "cost_total": "💰Σ",
+    "balance": "💳",
+    "model": "🤖",
+}
+_ICON_SIMPLE: dict[str, str] = {
+    "input": "↑",
+    "output": "↓",
+    "finish": "✂︎",
+    "total": "Σ",
+    "tokens_total": "ΣΣ",
+    "reasoning": "∴",
+    "cached": "≡",
+    "audio": "♪",
+    "time": "◷",
+    "prefill": "⇥",
+    "tps": "»",
+    "cost": "",  # cost value already carries "$"
+    "cost_total": "Σ",
+    "balance": "¤",  # unlike cost, needs a glyph: both values carry "$"
+    "model": "◇",
+}
+# context has a severity triplet (normal / warn / critical) instead of a flat icon.
+_CONTEXT_ICONS: dict[str, tuple[str, str, str]] = {
+    "emoji": ("📐", "🟠", "🔴"),
+    "simple": ("○", "◐", "●"),
+    "off": ("", "", ""),
+}
+
+
+def _icon(v: Filter.Valves, key: str) -> str:
+    """Icon glyph for a metric key under the current icon_style ('' when off/none)."""
+    style = getattr(v, "icon_style", "emoji")
+    if style == "off":
+        return ""
+    table = _ICON_SIMPLE if style == "simple" else _ICON_EMOJI
+    return table.get(key, "")
+
+
+def _with_icon(icon: str, body: str) -> str:
+    """Prefix a value with its icon, or return the bare value when there is no icon."""
+    return f"{icon} {body}" if icon else body
+
+
+def _context_icon(v: Filter.Valves, pct: float) -> str:
+    """Severity icon for context utilization under the current icon_style."""
+    style = getattr(v, "icon_style", "emoji")
+    normal, warn, crit = _CONTEXT_ICONS.get(style, _CONTEXT_ICONS["emoji"])
+    if pct >= v.context_critical_percent:
+        return crit
+    if pct >= v.context_warn_percent:
+        return warn
+    return normal
+
+
+def _fmt_count(v: Filter.Valves, n: float) -> str:
+    """Format a token counter: compact k/M when compact_numbers, else grouped digits."""
+    if getattr(v, "compact_numbers", False):
+        return _format_k(n)
+    return f"{int(n):,}"
+
+
+# --- stats-line renderers (one per metric key; None = omitted) ------------------
+# show_* gating lives here, so a disabled or data-less metric returns None and simply
+# does not appear. Icons come from _icon/_context_icon; counters from _fmt_count.
+
+
+@dataclass(frozen=True, slots=True)
+class _Stats:
+    """Everything a stats-line renderer may read: the valves plus the resolved bags of one response.
+
+    One object instead of a shared positional signature, so every renderer reads only the fields it
+    needs and the dispatch table stays uniform.
+    """
+
+    valves: Filter.Valves
+    tokens: dict[str, Any]
+    timing: dict[str, Any]
+    ctx: dict[str, Any]
+    cost: dict[str, Any]
+    model: dict[str, Any] | None
+    finish_reason: str | None = None
+    balance: dict[str, Any] | None = None
+
+
+def _approx(tokens: dict[str, Any]) -> str:
+    """`≈` for a turn whose usage OWUI marked incomplete (0.12.5+: a model call reported no count)."""
+    return "≈" if tokens["incomplete"] else ""
+
+
+def _render_input(s: _Stats) -> str | None:
+    if s.valves.show_input_tokens and s.tokens["input"] is not None:
+        return _with_icon(_icon(s.valves, "input"), _approx(s.tokens) + _fmt_count(s.valves, s.tokens["input"]))
+    return None
+
+
+def _render_output(s: _Stats) -> str | None:
+    if s.valves.show_output_tokens and s.tokens["output"] is not None:
+        return _with_icon(_icon(s.valves, "output"), _approx(s.tokens) + _fmt_count(s.valves, s.tokens["output"]))
+    return None
+
+
+def _render_finish(s: _Stats) -> str | None:
+    # Only a cut-off answer is worth a slot: "length" (the output-token limit) and, from a Responses API
+    # stream on OWUI 0.13.1+, "incomplete" (mostly the same limit; OWUI also gives it to a content-filter
+    # stop or a failed stream and keeps no detail). "stop" is the norm, "tool_calls" ends a turn paused for
+    # approval or stopped at the tool-call limit, and a missing value (OWUI < 0.12) means unknown.
+    if s.valves.show_finish_reason and s.finish_reason in ("length", "incomplete"):
+        return _with_icon(_icon(s.valves, "finish"), "truncated")
+    return None
+
+
+def _render_total(s: _Stats) -> str | None:
+    if s.valves.show_total_tokens and s.tokens["total"] is not None:
+        return _with_icon(_icon(s.valves, "total"), _approx(s.tokens) + _fmt_count(s.valves, s.tokens["total"]))
+    return None
+
+
+def _render_tokens_total(s: _Stats) -> str | None:
+    # Token twin of cost_total: omitted when it equals the message Σ (first turn, unsaved chats).
+    # ≈ marks a total that includes a tiktoken-estimated or an incomplete (OWUI 0.12.5+) turn.
+    tokens = s.tokens
+    if s.valves.show_cumulative_tokens and tokens["cumulative"] is not None and tokens["cumulative"] != tokens["total"]:
+        prefix = "≈" if tokens["cumulative_est"] else ""
+        return _with_icon(_icon(s.valves, "tokens_total"), f"{prefix}{_fmt_count(s.valves, tokens['cumulative'])}")
+    return None
+
+
+def _render_reasoning(s: _Stats) -> str | None:
+    if s.valves.show_reasoning_tokens and s.tokens["reasoning"]:
+        return _with_icon(_icon(s.valves, "reasoning"), _fmt_count(s.valves, s.tokens["reasoning"]))
+    return None
+
+
+def _render_cached(s: _Stats) -> str | None:
+    if s.valves.show_cached_tokens and s.tokens["cached"]:
+        return _with_icon(_icon(s.valves, "cached"), _fmt_count(s.valves, s.tokens["cached"]))
+    return None
+
+
+def _render_audio(s: _Stats) -> str | None:
+    if s.valves.show_audio_tokens and s.tokens["audio"]:
+        return _with_icon(_icon(s.valves, "audio"), _fmt_count(s.valves, s.tokens["audio"]))
+    return None
+
+
+def _render_context(s: _Stats) -> str | None:
+    size, used = s.ctx["size"], s.ctx["used"]
+    if s.valves.show_context_window and size and used is not None:
+        pct = (used / size) * 100
+        prefix = "≈" if s.ctx["used_est"] else ""
+        body = f"{prefix}{_format_k(used)}/{_format_k(size)} ({pct:.0f}%)"
+        return _with_icon(_context_icon(s.valves, pct), body)
+    return None
+
+
+def _render_time(s: _Stats) -> str | None:
+    if s.valves.show_generation_time and s.timing["seconds"] is not None:
+        prefix = "~" if s.timing["source"] == "wall" else ""
+        return _with_icon(_icon(s.valves, "time"), f"{prefix}{_format_duration(s.timing['seconds'])}")
+    return None
+
+
+def _render_prefill(s: _Stats) -> str | None:
+    speed, count = s.timing.get("prefill_tps"), s.timing.get("prefill_tokens")
+    if not s.valves.show_prefill_tokens_per_second or speed is None or speed <= 0:
+        return None
+    if count is not None and count < s.valves.prefill_min_tokens:
+        return None
+    text = f"{speed:,.0f}" if speed >= _THOUSAND else f"{speed:.1f}"
+    return _with_icon(_icon(s.valves, "prefill"), f"prefill {text} t/s")
+
+
+def _render_tps(s: _Stats) -> str | None:
+    if s.valves.show_tokens_per_second and s.timing["tps"]:
+        return _with_icon(_icon(s.valves, "tps"), f"{s.timing['tps']:.1f} t/s")
+    return None
+
+
+def _render_cost(s: _Stats) -> str | None:
+    # No dedicated show_* flag: visibility is driven by cost_mode via the precomputed
+    # cost dict (message is None when cost_mode == off or no price). cost_min_display
+    # additionally hides negligible amounts (default 0.0 hides nothing).
+    cost = s.cost
+    if cost["message"] is not None and cost["message"] >= s.valves.cost_min_display:
+        prefix = "≈" if cost["message_est"] else ""
+        return _with_icon(_icon(s.valves, "cost"), f"{prefix}{_format_cost(cost['message'])}")
+    return None
+
+
+def _render_cost_total(s: _Stats) -> str | None:
+    cost = s.cost
+    if (
+        cost["cumulative"] is not None
+        and s.valves.show_cumulative_cost
+        and cost["cumulative"] >= s.valves.cost_min_display
+        and (cost["message"] is None or abs(cost["cumulative"] - cost["message"]) > _COST_EQUAL_EPSILON)
+    ):
+        prefix = "≈" if cost["cumulative_est"] else ""
+        return _with_icon(_icon(s.valves, "cost_total"), f"{prefix}{_format_cost(cost['cumulative'])}")
+    return None
+
+
+def _render_balance(s: _Stats) -> str | None:
+    # An OpenRouter account can run below zero; _format_cost would print that as $0.00.
+    usd = s.balance.get("usd") if s.balance else None
+    if s.valves.show_balance and usd is not None:
+        body = f"-{_format_cost(-usd)}" if usd < 0 else _format_cost(usd)
+        return _with_icon(_icon(s.valves, "balance"), body)
+    return None
+
+
+def _render_model(s: _Stats) -> str | None:
+    if s.valves.show_model_name and isinstance(s.model, dict):
+        info = s.model.get("info")
+        base = info.get("base_model_id") if isinstance(info, dict) else None
+        if base:
+            return _with_icon(_icon(s.valves, "model"), base)
+    return None
+
+
+def _render_source(s: _Stats) -> str | None:
+    # The "not shown on its own" guard lives in _build_stats, not here. No icon in any
+    # style: the [API]/[est.] brackets are self-labeling.
+    if s.valves.show_data_source:
+        return f"[{'API' if s.tokens['is_api'] else 'est.'}]"
+    return None
+
+
+_STATS_RENDERERS: dict[str, Callable[[_Stats], str | None]] = {
+    "input": _render_input,
+    "output": _render_output,
+    "finish": _render_finish,
+    "total": _render_total,
+    "tokens_total": _render_tokens_total,
+    "reasoning": _render_reasoning,
+    "cached": _render_cached,
+    "audio": _render_audio,
+    "context": _render_context,
+    "time": _render_time,
+    "prefill": _render_prefill,
+    "tps": _render_tps,
+    "cost": _render_cost,
+    "cost_total": _render_cost_total,
+    "balance": _render_balance,
+    "model": _render_model,
+    "source": _render_source,
+}
+
+
+@dataclass(frozen=True, slots=True)
+class _Turn:
+    """Request-side inputs of one outlet call that the debug payload reports next to the stats."""
+
+    task: Any
+    messages: list[Any]
+    assistant_msg: dict[str, Any]
+    usage: dict[str, Any] | None
+    metadata: dict[str, Any] | None
+
+
+class Filter:
+    """Open WebUI filter: times the request in inlet, emits the usage stats line in outlet."""
+
+    class Valves(BaseModel):
+        """Admin settings (Admin -> Functions -> valves)."""
+
+        priority: int = Field(
+            default=10,
+            description="Filter priority (lower runs first). Keep high so this runs after other filters.",
+        )
+        show_input_tokens: bool = Field(default=True, description="Display input (prompt) token count.")
+        show_output_tokens: bool = Field(default=True, description="Display output (completion) token count.")
+        show_finish_reason: bool = Field(
+            default=True,
+            description=(
+                "Flag a response the model cut off at its output-token limit (✂️ truncated). Needs Open WebUI "
+                "0.12.0+ and a Chat Completions (OpenAI-compatible) or Ollama model; for the Responses API, "
+                "0.13.0+ (non-streaming) or 0.13.1+ (streaming, where a content-filter stop or a failed "
+                "stream is flagged too)."
+            ),
+        )
+        show_total_tokens: bool = Field(default=True, description="Display total token count.")
+        show_cumulative_tokens: bool = Field(
+            default=True,
+            description=(
+                "Also show the running token total for the whole chat (the sum of every response's Σ). "
+                "Each turn re-reads the history, so it grows much faster than the context window."
+            ),
+        )
+        show_generation_time: bool = Field(default=True, description="Display generation time.")
+        show_tokens_per_second: bool = Field(default=True, description="Display output tokens per second.")
+        show_prefill_tokens_per_second: bool = Field(
+            default=True,
+            description=(
+                "Display native llama.cpp/vLLM prompt-processing tokens/sec when timing is available. "
+                "vLLM streaming requires --enable-per-request-metrics and "
+                "--enable-prompt-tokens-details; cached tokens are excluded. "
+                "Tool turns show the last model call's rate. Missing timings are hidden."
+            ),
+        )
+        prefill_min_tokens: int = Field(
+            default=64,
+            ge=0,
+            description=(
+                "Hide prefill rates when fewer than this many newly processed tokens are reported, "
+                "since tiny prefills mostly measure overhead. 0 disables the threshold; native rate-only "
+                "reports without a token count are unaffected."
+            ),
+        )
+        show_reasoning_tokens: bool = Field(
+            default=True, description="Display reasoning/thinking tokens (o1/o3/o4, Gemini thinking)."
+        )
+        show_cached_tokens: bool = Field(default=True, description="Display cached prompt tokens (cache hits).")
+        show_audio_tokens: bool = Field(default=False, description="Display audio tokens (gpt-4o-audio etc.).")
+        show_model_name: bool = Field(default=True, description="Display base model name for workspace models.")
+        show_data_source: bool = Field(default=False, description="Append [API]/[est.] to indicate token count source.")
+        display_order: str = Field(
+            default=", ".join(_DEFAULT_ORDER),
+            description=(
+                "Comma-separated metric order, pre-filled with the default order — reorder or trim "
+                "to taste (empty also means default). Keys: input, output, finish, total, tokens_total, reasoning, "
+                "cached, audio, context, time, prefill, tps, cost, cost_total, balance, model, source. "
+                "This only sorts: "
+                "visibility is governed by the show_* toggles, and removing a key here does NOT hide "
+                "it (use show_* for that) — it just moves to the end, like any enabled-but-unlisted metric."
+            ),
+        )
+        separator: str = Field(
+            default=" · ",
+            description="String placed between stats items in the line (default ' · ').",
+        )
+        icon_style: Literal["emoji", "simple", "off"] = Field(
+            default="emoji",
+            description=(
+                "Icon rendering: 'emoji' (colorful, default), 'simple' (monochrome unicode symbols), "
+                "'off' (no icons — bare values; pure counters like input/output/total become ambiguous, "
+                "while cost/context/time/tps/source stay self-labeled via $, %, s, t/s, [API]; the balance "
+                "also reads $ and is told from cost by its place after it)."
+            ),
+        )
+        compact_numbers: bool = Field(
+            default=False,
+            description=(
+                "Abbreviate token counters as k/M (e.g. 12,345 -> 12.3k, 1,234,567 -> 1.2M), matching "
+                "the context-window style. Off = full numbers with thousands separators. Affects only "
+                "the seven counters (input, output, total, tokens_total, reasoning, cached, audio)."
+            ),
+        )
+        fallback_to_tiktoken: bool = Field(
+            default=True, description="Estimate tokens with tiktoken when the API reports no usage (needs tiktoken)."
+        )
+        count_all_messages_for_input: bool = Field(
+            default=True,
+            description="When estimating input tokens, count the whole conversation, not just the last turn.",
+        )
+        # --- Context-window utilization ---
+        show_context_window: bool = Field(
+            default=True, description="Display context-window utilization (used/available + %)."
+        )
+        context_size_override: int = Field(
+            default=0, description="Force a context-window size (tokens). 0 = auto-detect. Highest priority."
+        )
+        context_size_map: str = Field(
+            default="",
+            description=(
+                'JSON object of {"model-substring": context_tokens}. An explicit override: checked '
+                "BEFORE the models.dev fetch and the built-in table, so it always wins on a match."
+            ),
+        )
+        fetch_context_from_modelsdev: bool = Field(
+            default=False,
+            description="Live context sizes from models.dev (opt-in, cached). Overrides the static table on match.",
+        )
+        modelsdev_url: str = Field(
+            default="https://models.dev/models.json",
+            description="models.dev endpoint used when fetch_context_from_modelsdev is on.",
+        )
+        modelsdev_ttl: int = Field(
+            default=86400, description="Seconds to cache the fetched models.dev context table (default 24h)."
+        )
+        context_warn_percent: int = Field(default=30, description="Context % at which the icon turns orange.")
+        context_critical_percent: int = Field(default=70, description="Context % at which the icon turns red.")
+        llamacpp_url: str = Field(
+            default="",
+            description=(
+                "Optional llama.cpp base URL (e.g. http://127.0.0.1:8080) probed via /v1/models, then /props, "
+                "for the running n_ctx. Only needed when OWUI's model list lacks it (older llama.cpp). Empty=off."
+            ),
+        )
+        llama_swap_url: str = Field(
+            default="",
+            description=(
+                "Optional llama-swap base URL probed via /running, then /props?model= for the running n_ctx. "
+                "Only needed when the model is not listed through an OWUI connection to that llama-swap. Empty=off."
+            ),
+        )
+        context_probe_ttl: int = Field(default=600, description="Seconds to cache a probed/resolved context size.")
+        # --- Cost ---
+        cost_mode: Literal["off", "auto", "estimate"] = Field(
+            default="auto",
+            description=(
+                "off = never show/compute cost; auto = show only the provider's own cost "
+                "(OpenRouter/LiteLLM), never estimate or fetch; estimate = also approximate cost "
+                "from models.dev prices when the provider reports none (marked ≈)."
+            ),
+        )
+        show_cumulative_cost: bool = Field(
+            default=True, description="Also show the running total cost for the whole chat."
+        )
+        cost_min_display: float = Field(
+            default=0.0,
+            description=(
+                "Hide message/cumulative cost when its USD value is below this threshold. Default 0.0 "
+                "shows everything (including $0.00). E.g. 0.0001 drops negligible sub-$0.0001 costs."
+            ),
+        )
+        price_map: str = Field(
+            default="",
+            description=(
+                'JSON of {"model-substring": {"input": USD_per_1M, "output": USD_per_1M, '
+                '"cache_read": USD_per_1M, "cache_write": USD_per_1M}}; highest priority in estimate mode.'
+            ),
+        )
+        fetch_prices_from_modelsdev: bool = Field(
+            default=True,
+            description=(
+                "In estimate mode, fetch live per-provider prices from models.dev (cached ~24h). "
+                "Off = static table only."
+            ),
+        )
+        modelsdev_api_url: str = Field(
+            default="https://models.dev/api.json",
+            description="models.dev price endpoint used when fetch_prices_from_modelsdev is on.",
+        )
+        # --- OpenRouter balance ---
+        show_balance: bool = Field(
+            default=False,
+            description=(
+                "Show the remaining OpenRouter account balance (💳), asked from openrouter.ai after every response "
+                "of a model served through an openrouter.ai connection, with that connection's key. Off by default: "
+                "it adds one request per response (the stats line waits for it, up to 2 s), and the balance may not "
+                "include the message it is shown under yet, since OpenRouter settles a charge shortly after it ends."
+            ),
+        )
+        openrouter_api_key: str = Field(
+            default="",
+            description=(
+                "Optional OpenRouter key for the balance; empty = the key of the model's openrouter.ai connection. "
+                "An ordinary API key is enough - a management key is NOT needed and can manage every key on the "
+                "account. WARNING: valves are not a safe place for a key - every Open WebUI admin can read it back "
+                "and any other function or tool on this server can read it. Use at your own risk."
+            ),
+            json_schema_extra={"input": {"type": "password"}},
+        )
+        balance_for_all_users: bool = Field(
+            default=False,
+            description=(
+                "Show the balance to every user, not only admins. It is the account owner's money, and the stats "
+                "line stays in the chat history and in shared chats."
+            ),
+        )
+        balance_on_every_model: bool = Field(
+            default=False,
+            description=(
+                "Show the balance under every model's responses, not only those served by an openrouter.ai "
+                "connection - for OpenRouter behind a proxy such as LiteLLM. Needs openrouter_api_key."
+            ),
+        )
+        debug_mode: bool = Field(
+            default=False,
+            description=(
+                "Attach a sanitized diagnostic payload under each response as a 'Debug info' source (citation), "
+                "and print it to the server log."
+            ),
+        )
+
+    class UserValves(BaseModel):
+        """Per-user settings: only the kill-switch (per-user display customization was rolled back)."""
+
+        enabled: bool = Field(default=True, description="Show token usage stats below responses.")
+
+    def __init__(self) -> None:
+        """Instantiate the admin valves with defaults; OWUI replaces them with the saved ones."""
+        self.valves = self.Valves()
+
+    # --- inlet: record start time + capture context hints ----------------------
+
+    async def inlet(
+        self,
+        body: dict[str, Any],
+        __metadata__: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Stash a start timestamp and any context-size hint for the outlet."""
+        chat_id = (__metadata__ or {}).get("chat_id", "") or ""
+        message_id = (__metadata__ or {}).get("message_id", "") or ""
+        key = f"{chat_id}:{message_id}" if (chat_id or message_id) else f"fallback:{id(body)}"
+
+        start_time = time.time()
+        _request_timings[key] = start_time
+
+        # num_ctx is only visible in the inbound body (OWUI strips generation params from model.info.params).
+        num_ctx = (
+            _first_num(body, "num_ctx")
+            or _first_num(body.get("options", {}) if isinstance(body.get("options"), dict) else {}, "num_ctx")
+            or _first_num(body.get("params", {}) if isinstance(body.get("params"), dict) else {}, "num_ctx")
+        )
+
+        if "metadata" not in body or not isinstance(body.get("metadata"), dict):
+            body["metadata"] = {}
+        body["metadata"]["_tud_timing_key"] = key
+        body["metadata"]["_tud_start"] = start_time
+        if num_ctx:
+            body["metadata"]["_tud_num_ctx"] = int(num_ctx)
+
+        if __metadata__ is not None:
+            __metadata__["_tud_timing_key"] = key
+            __metadata__["_tud_start"] = start_time
+            if num_ctx:
+                __metadata__["_tud_num_ctx"] = int(num_ctx)
+
+        return body
+
+    # --- request: right before each model call (OWUI 0.11.2+) ------------------
+
+    async def request(
+        self,
+        body: dict[str, Any],
+        __metadata__: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Stamp the first model call of the turn and count the calls.
+
+        OWUI calls this after RAG, web search and tool resolution, right before the model call, and again
+        before every tool-loop round, with the same `__metadata__` dict the outlet gets. The first stamp
+        starts the wall-clock generation time (so it excludes that pre-processing); the count lets
+        `_last_round_context` split a summed Anthropic-native cache. Older OWUI never calls it: the inlet
+        stamp and no count remain. Keep it trivial: unlike the outlet, OWUI re-raises an error from this hook
+        into the user's chat request (`utils/filter.py`).
+        """
+        if __metadata__ is not None:
+            __metadata__.pop("_tud_prefill", None)
+            __metadata__.setdefault("_tud_model_start", time.time())
+            __metadata__["_tud_model_calls"] = __metadata__.get("_tud_model_calls", 0) + 1
+        return body
+
+    async def stream(self, event: dict[str, Any], __metadata__: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Capture native vLLM timing in per-call metadata without changing the chunk."""
+        try:
+            if (
+                not self.valves.show_prefill_tokens_per_second
+                or __metadata__ is None
+                or "_tud_model_calls" not in __metadata__
+            ):
+                return event
+            metrics, usage = event.get("metrics"), event.get("usage")
+            if not isinstance(metrics, dict) or not isinstance(usage, dict):
+                return event
+            # In the tested vLLM schema this is scheduled-to-first-token time,
+            # excluding queue wait. Do not interpret arbitrary network TTFT.
+            if not all(key in metrics for key in ("queue_time_ms", "generation_time_ms")):
+                return event
+            ms = _num(metrics.get("time_to_first_token_ms"))
+            prompt = _first_num(usage, "prompt_tokens", "input_tokens")
+            cached = _detail_num(usage, "prompt_tokens_details", "cached_tokens")
+            if cached is None:
+                cached = _detail_num(usage, "input_tokens_details", "cached_tokens")
+            if ms is not None and ms > 0 and prompt is not None and cached is not None and 0 <= cached <= prompt:
+                __metadata__["_tud_prefill"] = {"ms": ms, "tokens": prompt - cached}
+        except Exception:  # noqa: BLE001 - a stream exception makes OWUI drop the final usage chunk
+            return event
+        return event
+
+    # --- outlet: build and emit the stats line ---------------------------------
+
+    @staticmethod
+    def _turn_skipped(user: dict[str, Any] | None, task: object) -> bool:
+        """True when the user switched the stats off or the request is a non-chat background task."""
+        user_valves = user.get("valves") if user else None
+        if user_valves is not None and hasattr(user_valves, "enabled") and not user_valves.enabled:
+            return True
+        # Skip non-chat background tasks (title/tag/query/etc.).
+        return task in (
+            "title_generation",
+            "tags_generation",
+            "follow_up_generation",
+            "emoji_generation",
+            "query_generation",
+            "autocomplete_generation",
+            "moa_response_generation",
+        )
+
+    def _can_show(
+        self,
+        body: dict[str, Any],
+        metadata: dict[str, Any] | None,
+        emitter: Callable[[dict[str, Any]], Awaitable[None]] | None,
+    ) -> bool:
+        """False when nothing the outlet produces can reach anyone, so the network lookups are skipped.
+
+        OWUI gives no emitter to a request without a chat id (raw API calls; the outlet still runs, and on the
+        non-streaming path it delays the HTTP response). A `channel:` chat's emitter drops `status` and
+        `citation` events entirely; there only debug mode is worth running, for its stdout copy.
+        """
+        if emitter is None:
+            return False
+        chat_id = (metadata or {}).get("chat_id") or body.get("chat_id") or ""
+        return self.valves.debug_mode or not str(chat_id).startswith("channel:")
+
+    async def outlet(  # noqa: PLR0913 - OWUI injects each dunder kwarg the signature names; one per source
+        self,
+        body: dict[str, Any],
+        *,
+        __user__: dict[str, Any] | None = None,
+        __event_emitter__: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
+        __metadata__: dict[str, Any] | None = None,
+        __model__: dict[str, Any] | None = None,
+        __request__: Any = None,
+    ) -> dict[str, Any]:
+        """Resolve tokens, timing, context, cost and balance for the last response and emit the stats line."""
+        task = (__metadata__ or {}).get("task")
+        # First, on every path: it releases the inlet's `_request_timings` entry and purges stale ones, so a
+        # turn that returns early below (stats off, nowhere to show, no reply) cannot leak it.
+        elapsed_seconds = self._resolve_wall_clock(body, __metadata__)
+        if self._turn_skipped(__user__, task) or not self._can_show(body, __metadata__, __event_emitter__):
+            return body
+
+        messages = body.get("messages", [])
+        if not messages:
+            return body
+        assistant_msg = _get_last_assistant_message_obj(messages)
+        if not assistant_msg:
+            return body
+
+        v = self.valves
+
+        usage = assistant_msg.get("usage") if isinstance(assistant_msg.get("usage"), dict) else None
+
+        model_id = _resolve_model_id(__model__, body)
+        calls = (__metadata__ or {}).get("_tud_model_calls")
+        model_calls = calls if isinstance(calls, int) else None
+        tokens = self._extract_tokens(usage, assistant_msg, messages, model_id, model_calls)
+        timing = self._resolve_timing(usage, elapsed_seconds, tokens["output"], __metadata__)
+        # The two resolvers touch valve-parsed maps and the network; a bug in either must degrade to a
+        # sentinel, never break the response pipeline.
+        try:
+            ctx = await self._resolve_context(body, __metadata__, __model__, tokens, __request__)
+        except Exception:  # noqa: BLE001
+            ctx = {
+                "size": None,
+                "used": None,
+                "used_source": None,
+                "used_est": False,
+                "source": "error",
+                "matched_key": None,
+            }
+
+        try:
+            cost = await self._resolve_cost(usage, tokens, messages, model_id)
+        except Exception:  # noqa: BLE001
+            cost = {"message": None, "message_est": False, "cumulative": None, "cumulative_est": False}
+        try:
+            balance = await self._resolve_balance(__model__, __user__, __request__)
+        except Exception:  # noqa: BLE001
+            balance = {"usd": None, "status": "error", "key_source": None, "on_openrouter": None}
+
+        finish = assistant_msg.get("finish_reason")
+        stats = _Stats(
+            valves=v,
+            tokens=tokens,
+            timing=timing,
+            ctx=ctx,
+            cost=cost,
+            model=__model__,
+            finish_reason=finish if isinstance(finish, str) else None,
+            balance=balance,
+        )
+        stats_parts = self._build_stats(stats)
+        if v.debug_mode:
+            stats_parts.append("(debug)")
+
+        if stats_parts and __event_emitter__:
+            await __event_emitter__(
+                {
+                    "type": "status",
+                    "data": {"description": v.separator.join(stats_parts), "done": True},
+                }
+            )
+
+        if v.debug_mode and __event_emitter__:
+            turn = _Turn(task=task, messages=messages, assistant_msg=assistant_msg, usage=usage, metadata=__metadata__)
+            await self._emit_debug(__event_emitter__, turn, stats)
+
+        return body
+
+    # --- token extraction ------------------------------------------------------
+
+    def _extract_tokens(
+        self,
+        usage: dict[str, Any] | None,
+        assistant_msg: dict[str, Any],
+        messages: list[Any],
+        model_id: str,
+        model_calls: int | None = None,
+    ) -> dict[str, Any]:
+        """Return a normalized bag of token counts across all providers/APIs.
+
+        `model_calls` is how many model calls the turn made, counted by the `request` hook (OWUI 0.11.2+);
+        it only splits a summed Anthropic-native cache in `_last_round_context`.
+        """
+        result: dict[str, Any] = {
+            "input": None,
+            "output": None,
+            "total": None,
+            "reasoning": None,
+            "cached": None,
+            "cache_write": None,
+            "audio": None,
+            "is_api": False,
+            "is_anthropic": False,
+            "input_has_cache": False,
+            "fresh_input": None,
+            "context_used": None,
+            "context_est": False,
+            "incomplete": False,
+            "cumulative": None,
+            "cumulative_est": False,
+        }
+
+        if usage:
+            # Primary: OWUI-normalized triple; provider keys as backup.
+            result["input"] = _first_num(usage, "input_tokens", "prompt_tokens", "prompt_eval_count", "prompt_n")
+            result["output"] = _first_num(usage, "output_tokens", "completion_tokens", "eval_count", "predicted_n")
+            if result["input"] is not None or result["output"] is not None:
+                result["is_api"] = True
+                # OWUI 0.12.5+: a model call of the turn reported no input or output count, so the counters
+                # cover only part of it (always True when merge_usage saw such a call; absent before 0.12.5).
+                result["incomplete"] = usage.get("incomplete") is True
+
+            # Reasoning: Chat Completions vs Responses API naming.
+            result["reasoning"] = _detail_num(usage, "completion_tokens_details", "reasoning_tokens") or _detail_num(
+                usage, "output_tokens_details", "reasoning_tokens"
+            )
+
+            # Cache tokens + cache semantics (subset-of-input vs on-top) — see _cache_and_fresh.
+            cache = self._cache_and_fresh(usage, result["input"])
+            result["cached"] = cache["cached"]
+            result["cache_write"] = cache["cache_write"]
+            result["is_anthropic"] = cache["is_anthropic"]
+            result["input_has_cache"] = cache["input_has_cache"]
+            result["fresh_input"] = cache["fresh_input"]
+
+            # Audio tokens (input+output), either naming.
+            audio_out = _detail_num(usage, "completion_tokens_details", "audio_tokens") or _detail_num(
+                usage, "output_tokens_details", "audio_tokens"
+            )
+            audio_in = _detail_num(usage, "prompt_tokens_details", "audio_tokens") or _detail_num(
+                usage, "input_tokens_details", "audio_tokens"
+            )
+            total_audio = (audio_in or 0) + (audio_out or 0)
+            result["audio"] = total_audio or None
+
+        # Fallback estimation when the provider reported no usage.
+        if not result["is_api"] and self.valves.fallback_to_tiktoken and _TIKTOKEN_AVAILABLE:
+            self._estimate_tokens(result, assistant_msg, messages, model_id)
+
+        # Derived total: fresh input + cache (read+write) + output — correct for every shape.
+        result["total"] = self._compute_total(result)
+
+        # The "used" side of 📐: the last round's request, not the cross-round sum.
+        result["context_used"] = self._last_round_context(usage, result, model_calls)
+        result["context_est"] = result["incomplete"] or self._summed_native_cache(usage, result)
+
+        # Running chat total — derived after `total`, so the current turn counts exactly as displayed.
+        cumulative = self._cumulative_tokens(messages, assistant_msg, result)
+        result["cumulative"] = cumulative["total"]
+        result["cumulative_est"] = cumulative["estimated"]
+        return result
+
+    def _estimate_tokens(
+        self, result: dict[str, Any], assistant_msg: dict[str, Any], messages: list[Any], model_id: str
+    ) -> None:
+        """Estimate input/output tokens with tiktoken when the provider reported no usage."""
+        response_text = _message_text(assistant_msg)
+        if response_text:
+            est_out = _count_tokens_tiktoken(response_text, model_id)
+            if est_out is not None:
+                result["output"] = est_out
+
+        if self.valves.count_all_messages_for_input:
+            parts = [_message_text(m) for m in messages if m is not assistant_msg]
+            est_in = _count_tokens_tiktoken(" ".join(p for p in parts if p), model_id)
+        else:
+            est_in = None
+            for m in reversed(messages):
+                if isinstance(m, dict) and m.get("role") == "user":
+                    est_in = _count_tokens_tiktoken(_message_text(m), model_id)
+                    break
+        if est_in is not None:
+            result["input"] = est_in
+
+    @staticmethod
+    def _cache_and_fresh(usage: dict[str, Any], reported_input: float | None) -> dict[str, Any]:
+        """Cache read/write tokens + whether the reported input already includes them.
+
+        Cache is reported with two different semantics depending on provider/proxy shape:
+          * OpenAI / DeepSeek / Gemini / Anthropic-*via-LiteLLM* put cache inside
+            `*_tokens_details` -> cache is a SUBSET of the reported prompt/input tokens
+            (LiteLLM folds Anthropic cache INTO prompt_tokens, so it must be subtracted back out).
+          * Anthropic *native* reports only top-level cache_read/creation_input_tokens and its
+            input EXCLUDES cache -> cache is billed ON TOP.
+        `fresh_input` is the full-price (uncached) input for BOTH shapes, so callers price and
+        total uniformly without a per-provider branch.
+        """
+        # Not an `or`-chain: a measured `cached_tokens: 0` must stay 0, or a cache-write-only turn behind a proxy
+        # (detail dict + top-level cache_creation) would be taken for Anthropic-native and count the write twice.
+        pt_cached = _detail_num(usage, "prompt_tokens_details", "cached_tokens")
+        if pt_cached is None:
+            pt_cached = _detail_num(usage, "input_tokens_details", "cached_tokens")
+        pt_cache_creation = _detail_num(usage, "prompt_tokens_details", "cache_creation_tokens")
+        anth_read = _num(usage.get("cache_read_input_tokens"))
+        # ...but a zero detail beside a POSITIVE top-level read is a skeleton, not a fold (a fold copies the read
+        # into the detail), so it keeps the pre-2.9.1 reading: native, cache on top.
+        if pt_cached == 0 and anth_read:
+            pt_cached = None
+        anth_write = _num(usage.get("cache_creation_input_tokens"))
+        has_toplevel_anth = anth_read is not None or anth_write is not None
+
+        cached = anth_read if has_toplevel_anth else pt_cached
+        cache_write = anth_write if has_toplevel_anth else pt_cache_creation
+
+        # Pure Anthropic-native = top-level cache keys but NO OpenAI-style detail dict. Anything
+        # carrying *_tokens_details (incl. LiteLLM's Anthropic mapping) already folds cache into input.
+        native_anthropic = has_toplevel_anth and pt_cached is None and pt_cache_creation is None
+        input_has_cache = not native_anthropic
+
+        fresh_input = reported_input
+        if reported_input is not None and input_has_cache:
+            fresh_input = max(reported_input - (cached or 0) - (cache_write or 0), 0)
+
+        return {
+            "cached": cached,
+            "cache_write": cache_write,
+            "is_anthropic": has_toplevel_anth,
+            "input_has_cache": input_has_cache,
+            "fresh_input": fresh_input,
+        }
+
+    @staticmethod
+    def _summed_native_cache(usage: dict[str, Any] | None, result: dict[str, Any]) -> bool:
+        """True when Anthropic-native cache in `usage` is a sum over several model calls (OWUI 0.12.5+).
+
+        Since 0.12.5 merge_usage sums cache_read/cache_creation_input_tokens across calls and always writes
+        `incomplete` (True or False) on such a merge; no earlier version writes that key. So the key on a usage
+        with native cache means the cache covers the whole turn, not its last request.
+        """
+        return (
+            isinstance(usage, dict)
+            and "incomplete" in usage
+            and not result.get("input_has_cache")
+            and bool((result.get("cached") or 0) + (result.get("cache_write") or 0))
+        )
+
+    @staticmethod
+    def _last_round_context(
+        usage: dict[str, Any] | None, result: dict[str, Any], model_calls: int | None = None
+    ) -> int | None:
+        """Tokens occupying the model's context window at the end of the turn (the last request + its output).
+
+        On a multi-round (tool/agent) turn OWUI's merge_usage SUMS input/output/total_tokens over
+        every LLM round-trip, but since 0.11.0 rewrites prompt_tokens/completion_tokens from the
+        last round (`utils/response.py:merge_usage`) - so they are the only per-request numbers
+        left. On 0.10.x merge_usage summed them too, so there this equals the summed total (no
+        regression, no fix). A single round has prompt == input. Anthropic-native input EXCLUDES
+        cache (input_has_cache False), so its cache is added back: it occupies the window. Through
+        OWUI 0.12.4 the top-level cache fields were last-round as well (in none of merge_usage's
+        summed sets); since 0.12.5 they are summed over the turn's calls, and no per-call value
+        reaches the outlet. Then the cache added back is the per-call average (the sum divided by
+        `model_calls`, from the `request` hook) - an estimate the caller marks with ≈; it runs low,
+        as later rounds read a longer cached prefix, and lower still when `incomplete` is True: the count
+        then includes calls that reported no usage (or the cache is one call's, set by the middleware
+        without a merge). Without a call count the sum stays (≈ as well).
+        None when the provider reported no tokens (the tiktoken path): the caller falls back.
+        """
+        if not isinstance(usage, dict):
+            return None
+        last_prompt = _first_num(usage, "prompt_tokens", "input_tokens")
+        last_completion = _first_num(usage, "completion_tokens", "output_tokens")
+        if last_prompt is None and last_completion is None:
+            return None
+        used = (last_prompt or 0) + (last_completion or 0)
+        if not result.get("input_has_cache"):
+            cache = (result.get("cached") or 0) + (result.get("cache_write") or 0)
+            if model_calls and model_calls > 1 and Filter._summed_native_cache(usage, result):
+                cache /= model_calls
+            used += cache
+        return int(used)
+
+    def _compute_total(self, result: dict[str, Any]) -> int | None:
+        """Total tokens = fresh input + cache (read + write) + output.
+
+        Equals the provider's total for subset-cache shapes (OpenAI/DeepSeek/Gemini/LiteLLM),
+        and correctly adds cache for Anthropic-native (whose reported input omits it). fresh_input
+        falls back to the raw input on the tiktoken-estimate path (no cache there).
+        """
+        inp = result["input"]
+        out = result["output"]
+        if inp is None and out is None:
+            return None
+        fresh = result.get("fresh_input")
+        if fresh is None:
+            fresh = inp
+        return int((fresh or 0) + (result["cached"] or 0) + (result["cache_write"] or 0) + (out or 0))
+
+    def _cumulative_tokens(
+        self, messages: list[Any], assistant_msg: dict[str, Any], current: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Running chat token total: the Σ of every assistant turn on the branch, plus provenance.
+
+        The token twin of the cumulative-cost walk in _resolve_cost. The current turn comes from the
+        already-resolved bag, so a tiktoken-estimated Σ counts as displayed and marks the total
+        estimated; past turns re-derive the same cache-aware total from their persisted `usage`.
+        Past turns without usage are skipped, not re-estimated: unsaved chats carry no history usage
+        at all (see the NOTE block), and re-tokenizing the whole history on every response would be
+        quadratic. Every turn re-reads the history, so this counts processed tokens — it grows much
+        faster than the context window and is not "the size of the chat".
+        """
+        total = 0
+        counted = 0
+        skipped = 0
+        partial = False  # a past turn whose usage OWUI marked incomplete (0.12.5+)
+        for m in messages:
+            if not (isinstance(m, dict) and m.get("role") == "assistant") or m is assistant_msg:
+                continue
+            usage = m.get("usage")
+            turn = self._compute_total(self._usage_token_bag(usage))
+            if turn is None:
+                skipped += 1
+                continue
+            total += turn
+            counted += 1
+            partial = partial or (isinstance(usage, dict) and usage.get("incomplete") is True)
+        current_total = current["total"]
+        if current_total is not None:
+            total += current_total
+            counted += 1
+        else:
+            skipped += 1  # keeps counted + skipped == number of assistant messages
+        return {
+            "total": total if counted else None,
+            "estimated": partial or (current_total is not None and (not current["is_api"] or current["incomplete"])),
+            "messages_counted": counted,
+            "messages_skipped_no_usage": skipped,
+        }
+
+    # --- timing ----------------------------------------------------------------
+
+    @staticmethod
+    def _inlet_stash(body: dict[str, Any], metadata: dict[str, Any] | None, key: str) -> object:
+        """A value inlet mirrored into both `__metadata__` and `body["metadata"]`; __metadata__ wins."""
+        value = metadata.get(key) if metadata else None
+        if value is None or value == "":
+            body_meta = body.get("metadata")
+            if isinstance(body_meta, dict):
+                value = body_meta.get(key)
+        return value
+
+    def _resolve_wall_clock(self, body: dict[str, Any], metadata: dict[str, Any] | None) -> float | None:
+        """Wall-clock seconds from the first model call (else inlet) to outlet (multi-level fallback + leak cleanup)."""
+        inlet_start = _num(self._inlet_stash(body, metadata, "_tud_start"))
+        start_time = _num((metadata or {}).get("_tud_model_start")) or inlet_start
+
+        # Reconstruct the module-dict key and ALWAYS pop it (fixes the leak where
+        # the metadata path resolved timing but never released the module entry).
+        stashed_key = self._inlet_stash(body, metadata, "_tud_timing_key")
+        timing_key = stashed_key if isinstance(stashed_key, str) else ""
+        if not timing_key and metadata:
+            chat_id = metadata.get("chat_id", "") or ""
+            message_id = metadata.get("message_id", "") or ""
+            if chat_id or message_id:
+                timing_key = f"{chat_id}:{message_id}"
+        if timing_key:
+            popped = _request_timings.pop(timing_key, None)
+            if start_time is None:
+                start_time = popped
+
+        # Drop stale entries so the module dict cannot grow unbounded.
+        cutoff = time.time() - 600
+        for k in [k for k, ts in _request_timings.items() if ts < cutoff]:
+            _request_timings.pop(k, None)
+
+        return (time.time() - start_time) if start_time is not None else None
+
+    def _resolve_timing(
+        self,
+        usage: dict[str, Any] | None,
+        wall_seconds: float | None,
+        output_tokens: float | None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Prefer provider-reported generation time/tps; else labeled wall-clock."""
+        gen_seconds = None
+        tps = None
+        source = None
+
+        if usage:
+            eval_dur = _num(usage.get("eval_duration"))  # Ollama, nanoseconds
+            predicted_ms = _num(usage.get("predicted_ms"))  # llama.cpp
+            if eval_dur and eval_dur > 0:
+                gen_seconds, source = eval_dur / 1e9, "provider"
+            elif predicted_ms and predicted_ms > 0:
+                gen_seconds, source = predicted_ms / 1000.0, "provider"
+
+            ollama_tps = usage.get("response_token/s")
+            llama_tps = _num(usage.get("predicted_per_second"))
+            if _num(ollama_tps) is not None:
+                tps = _num(ollama_tps)
+            elif llama_tps is not None:
+                tps = llama_tps
+            elif source == "provider" and output_tokens and gen_seconds:
+                tps = output_tokens / gen_seconds
+
+        if gen_seconds is None and wall_seconds is not None:
+            gen_seconds, source = wall_seconds, "wall"
+        if tps is None and output_tokens and wall_seconds and wall_seconds > 0:
+            # Approximate: from the first model call (OWUI 0.11.2+; from inlet before, RAG and web search
+            # included), so time spent running tools between rounds is in it.
+            tps = output_tokens / wall_seconds
+
+        return {"seconds": gen_seconds, "tps": tps, "source": source, **self._resolve_prefill_timing(usage, metadata)}
+
+    @staticmethod
+    def _resolve_prefill_timing(usage: dict[str, Any] | None, metadata: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Read per-call metadata or native llama.cpp timing; never estimate from wall time."""
+        result: dict[str, Any] = {
+            "prefill_tps": None,
+            "prefill_seconds": None,
+            "prefill_tokens": None,
+            "prefill_source": None,
+        }
+        seconds = count = source = speed = None
+        native = (metadata or {}).get("_tud_prefill")
+        if isinstance(native, dict):
+            ms, count = _num(native.get("ms")), _num(native.get("tokens"))
+            if ms is not None and ms > 0 and count is not None and count >= 0:
+                seconds, source = ms / 1000.0, "vllm_native"
+        elif isinstance(usage, dict) and not usage.get("incomplete"):
+            # llama.cpp prompt_n counts only new tokens. OWUI's Ollama counts
+            # include cached tokens but omit their count: never read that path.
+            ms, count = _num(usage.get("prompt_ms")), _num(usage.get("prompt_n"))
+            if ms is not None and ms > 0:
+                seconds = ms / 1000.0
+            speed = _num(usage.get("prompt_per_second"))
+            source = "llamacpp_native"
+        if seconds is not None and count is not None and count >= 0:
+            speed = count / seconds
+        if speed is not None and speed > 0 and math.isfinite(speed):
+            result.update(
+                prefill_tps=speed,
+                prefill_seconds=seconds,
+                prefill_tokens=count,
+                prefill_source=source,
+            )
+        return result
+
+    # --- context window --------------------------------------------------------
+
+    async def _resolve_context(
+        self,
+        body: dict[str, Any],
+        metadata: dict[str, Any] | None,
+        model: dict[str, Any] | None,
+        tokens: dict[str, Any],
+        request: Any = None,
+    ) -> dict[str, Any]:
+        if not self.valves.show_context_window:
+            return {
+                "size": None,
+                "used": None,
+                "used_source": None,
+                "used_est": False,
+                "source": "disabled",
+                "matched_key": None,
+            }
+
+        # Last request first (see _last_round_context); the summed total only when it is unknown.
+        used, used_source = tokens["context_used"], "last_round"
+        if used is None:
+            used, used_source = tokens["total"], "total"
+        if used is None:
+            used, used_source = (tokens["input"] or 0) + (tokens["output"] or 0) or None, "input+output"
+
+        model_id = _resolve_model_id(model, body)
+
+        size, prov = await self._context_size_for(model_id, metadata, model, request)
+        return {
+            "size": size,
+            "used": used,
+            "used_source": used_source if used is not None else None,
+            # ≈: partial usage, or a summed Anthropic-native cache split per call (see _last_round_context).
+            "used_est": used is not None and tokens["context_est"],
+            "source": prov["source"],
+            "matched_key": prov["matched_key"],
+        }
+
+    async def _context_size_for(
+        self,
+        model_id: str,
+        metadata: dict[str, Any] | None,
+        model: dict[str, Any] | None = None,
+        request: Any = None,
+    ) -> tuple[int | None, dict[str, Any]]:
+        """Resolve context size + provenance ({source, matched_key}). Provenance is debug-only.
+
+        Resolution order: override -> num_ctx hint -> user context_size_map -> live window asked
+        through the model's own OWUI connection (llama-swap / llama.cpp router) -> size the backend
+        advertises in the model listing -> probe matched to the model -> live models.dev -> static
+        table -> unmatched single-model probe. What the running server reports beats the tables,
+        which only know a model's trained maximum (a llama.cpp `--ctx-size 16384` is not Qwen3's
+        131072), and a live answer beats a listed one (llama-swap lists a number from its config,
+        which `--fit` may not honor). The user's context_size_map stays above everything automatic.
+        """
+        explicit = self._explicit_context_size(model_id, metadata)
+        if explicit is not None:
+            return explicit
+        live = await self._connection_context_size(model, request)
+        if live is not None:
+            return live
+        # Read from the request's own model dict, so it is never cached: a relisted model applies at once.
+        advertised = self._backend_context_size(model, request)
+        if advertised is not None:
+            return advertised
+
+        cache_key = model_id.lower()
+        cached = _ctx_size_cache.get(cache_key)
+        if cached and cached[1] > time.time():
+            return cached[0], cached[2]
+
+        size, prov = await self._automatic_context_size(model_id)
+        if size is not None:
+            _ctx_size_cache[cache_key] = (size, time.time() + max(60, self.valves.context_probe_ttl), prov)
+        return size, prov
+
+    def _explicit_context_size(
+        self, model_id: str, metadata: dict[str, Any] | None
+    ) -> tuple[int, dict[str, Any]] | None:
+        """Tiers 1-3, set by the admin or the request itself. Never cached: valve edits apply at once."""
+        v = self.valves
+        # 1) Explicit override.
+        if v.context_size_override and v.context_size_override > 0:
+            return int(v.context_size_override), {"source": "override", "matched_key": None}
+        # 2) num_ctx captured at inlet (Ollama/local models — the actual running window, ground truth).
+        hint = (metadata or {}).get("_tud_num_ctx")
+        if isinstance(hint, int) and hint > 0:
+            return hint, {"source": "num_ctx", "matched_key": None}
+        # 3) User context_size_map — an explicit manual override, checked BEFORE the live models.dev
+        #    fetch (mirrors how price_map beats models.dev for cost). Returned uncached, like
+        #    override/num_ctx, so valve edits take effect at once and are never masked by a stale
+        #    _ctx_size_cache entry. Falsy sizes (e.g. 0) fall through to the automatic sources.
+        user_map = self._context_size_map_table()
+        umkey = _longest_key_match(user_map, model_id)
+        if umkey is not None and user_map[umkey]:
+            return int(user_map[umkey]), {"source": "user_map", "matched_key": umkey}
+        return None
+
+    @staticmethod
+    def _backend_context_size(model: dict[str, Any] | None, request: Any) -> tuple[int, dict[str, Any]] | None:
+        """Tier 5: the context size the backend itself lists for the model (see _advertised_context).
+
+        A workspace/preset model carries no listing row of its own, so its base model's row is read
+        from OWUI's model registry (`request.app.state.MODELS`, a dict or a RedisDict). That is OWUI
+        internals, hence the guard: any failure just means "not advertised".
+        """
+        if not isinstance(model, dict):
+            return None
+        found = _advertised_context(model) or _advertised_context(Filter._base_model_entry(model, request))
+        if found is None:
+            return None
+        return found[0], {"source": "backend", "matched_key": found[1]}
+
+    @staticmethod
+    def _base_model_entry(model: dict[str, Any], request: Any) -> dict[str, Any] | None:
+        """A workspace/preset model's base model entry from OWUI's model registry, else None.
+
+        The registry (`request.app.state.MODELS`, a dict or a RedisDict) is OWUI internals, hence the
+        guard: any failure just means "no base entry".
+        """
+        info = model.get("info")
+        base = info.get("base_model_id") if isinstance(info, dict) else None
+        if not base or request is None:
+            return None
+        try:
+            entry = request.app.state.MODELS.get(base)
+        except Exception:  # noqa: BLE001 - OWUI internals may change shape between versions
+            return None
+        return entry if isinstance(entry, dict) else None
+
+    async def _connection_context_size(
+        self, model: dict[str, Any] | None, request: Any
+    ) -> tuple[int, dict[str, Any]] | None:
+        """Tier 4: ask the model's llama-swap / llama.cpp router for the running window (issue #14).
+
+        Uses the OWUI connection the model is served through (base URL, API key, `prefix_id`), so
+        nothing is configured twice, and asks only backends detected from the listing row
+        (_live_backend), never a cloud provider. llama-swap: /running must show the model `ready`,
+        then /props?model= (proxied to that llama-server, so a `--fit` window is seen), falling back
+        to the row's `--ctx-size`. llama.cpp router: /props?model=&autoload=false, which refuses
+        rather than loads. A hit is cached like the other probes; a miss is not, so the next response
+        asks again.
+        """
+        if not isinstance(model, dict) or not _AIOHTTP_AVAILABLE:
+            return None
+        entry = model if isinstance(model.get("openai"), dict) else self._base_model_entry(model, request)
+        backend = _live_backend(entry)
+        url_idx = entry.get("urlIdx") if entry is not None else None
+        if backend is None or not isinstance(url_idx, int) or isinstance(url_idx, bool):
+            return None
+        cache_key = f"connection:{url_idx}:{backend[1]}"
+        cached = _ctx_size_cache.get(cache_key)
+        if cached and cached[1] > time.time():
+            return cached[0], cached[2]
+
+        connection = await self._owui_connection(url_idx, request)
+        if connection is None:
+            return None
+        base_url, headers, prefix_id = connection
+        kind, listed_id = backend
+        upstream_id = listed_id.removeprefix(f"{prefix_id}.") if prefix_id else listed_id
+        size = await self._ask_live_backend(kind, base_url, headers, upstream_id)
+        if size is None:
+            return None
+        prov = {"source": "connection_probe", "matched_key": f"{kind}:{upstream_id}"}
+        _ctx_size_cache[cache_key] = (size, time.time() + max(60, self.valves.context_probe_ttl), prov)
+        return size, prov
+
+    @staticmethod
+    async def _ask_live_backend(kind: str, base_url: str, headers: dict[str, str], upstream_id: str) -> int | None:
+        """The running n_ctx of `upstream_id` on a llama-swap or a llama.cpp router, else None. Never loads it."""
+        try:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=2)) as session:
+                if kind == "llama-swap":
+                    found = await Filter._probe_llama_swap(session, base_url, upstream_id, headers)
+                    return found[0] if found is not None and found[1] is not None else None
+                query = f"/props?model={quote(upstream_id, safe='')}&autoload=false"
+                async with session.get(base_url + query, headers=headers) as resp:
+                    return _props_n_ctx(await resp.json(content_type=None))
+        except Exception:  # noqa: BLE001 - backend down, auth refused or not JSON: fall through to the next tier
+            return None
+
+    @staticmethod
+    async def _owui_connection(url_idx: int, request: Any) -> tuple[str, dict[str, str], str | None] | None:
+        """(base URL without /v1, auth headers, prefix_id) of OWUI's OpenAI connection `url_idx`, else None.
+
+        OWUI internals, guarded: 0.10+ reads it via `routers.openai.get_openai_connection`, 0.9.x from
+        `request.app.state.config`. The API key is sent only as a bearer token and only when the
+        connection itself uses bearer auth (session/OAuth/Entra tokens are per-user and not reused).
+        """
+        try:
+            try:
+                from open_webui.routers.openai import get_openai_connection  # noqa: PLC0415 - OWUI-only module
+            except ImportError:
+                cfg = request.app.state.config
+                url, key = cfg.OPENAI_API_BASE_URLS[url_idx], cfg.OPENAI_API_KEYS[url_idx]
+                api_config = cfg.OPENAI_API_CONFIGS.get(str(url_idx), cfg.OPENAI_API_CONFIGS.get(url, {}))
+            else:
+                url, key, api_config = await get_openai_connection(url_idx)
+        except Exception:  # noqa: BLE001 - OWUI internals may change shape between versions
+            return None
+        if not isinstance(url, str) or not url or not isinstance(api_config, dict):
+            return None
+        auth = api_config.get("auth_type")
+        headers = {"Authorization": f"Bearer {key}"} if key and auth in (None, "bearer") else {}
+        prefix_id = api_config.get("prefix_id")
+        return url.rstrip("/").removesuffix("/v1"), headers, prefix_id if isinstance(prefix_id, str) else None
+
+    async def _automatic_context_size(self, model_id: str) -> tuple[int | None, dict[str, Any]]:
+        """Tiers 6-9, looked up automatically; the caller caches a hit."""
+        v = self.valves
+        # 6) Optional endpoint probe for local backends (opt-in via valve URL). A row matched to the
+        #    called model is the running window and wins; an unmatched single row waits for tier 9.
+        probe = await self._probe_context(model_id) if (v.llamacpp_url or v.llama_swap_url) else None
+        if probe is not None and probe[1] is not None:
+            return probe[0], {"source": "probe", "matched_key": probe[1]}
+        # 7) Live models.dev lookup (opt-in; cached ~24h).
+        if v.fetch_context_from_modelsdev:
+            table = await self._modelsdev_map()
+            key = _modelsdev_match(table, model_id)
+            if key is not None:
+                return table[key], {"source": "modelsdev", "matched_key": key}
+        # 8) Static table, matched by substring.
+        table = self._context_table()
+        key = _longest_key_match(table, model_id)
+        if key is not None:
+            return table[key], {"source": "static_table", "matched_key": key}
+        # 9) The only model a backend runs, under an id that differs from the called one. Ranked last:
+        #    with a cloud model called, this row is some other model's window.
+        if probe is not None:
+            return probe[0], {"source": "probe", "matched_key": None}
+        return None, {"source": "none", "matched_key": None}
+
+    async def _modelsdev_map(self) -> dict[str, Any]:
+        """Fetch and cache {model_id -> context_tokens} from models.dev. Non-fatal."""
+        now = time.time()
+        cached_map = _modelsdev_cache.get("map")
+        if cached_map is not None and _modelsdev_cache.get("expiry", 0) > now:
+            return cached_map  # type: ignore[no-any-return]
+
+        data, status = await _fetch_modelsdev(self.valves.modelsdev_url)
+        result: dict[str, Any] = {}
+        for key, entry in (data if isinstance(data, dict) else {}).items():
+            limit = entry.get("limit") if isinstance(entry, dict) else None
+            ctx = _num(limit.get("context")) if isinstance(limit, dict) else None
+            if ctx:
+                full = str(key).lower()
+                result[full] = int(ctx)
+                result.setdefault(full.split("/")[-1], int(ctx))
+
+        # Cache success for the full TTL; a failure only briefly so it retries soon.
+        ttl = self.valves.modelsdev_ttl if result else min(300, self.valves.modelsdev_ttl)
+        _modelsdev_cache.update(
+            map=result,
+            expiry=now + max(60, ttl),
+            status="empty" if status == "ok" and not result else status,
+            fetched_at=now,
+        )
+        return result
+
+    async def _probe_context(self, model_id: str) -> tuple[int, str | None] | None:
+        """Best-effort probe of a local backend for its running context size.
+
+        Returns (size, matched row id), with None for the id when the backend runs a single model
+        whose id differs from `model_id` (see _match_running). Fully isolated: any failure returns
+        None and never affects the stats line.
+        """
+        if not _AIOHTTP_AVAILABLE:
+            return None
+        v = self.valves
+        # Any failure (DNS, timeout, bad JSON, an aiohttp quirk) only means "no probe result".
+        try:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=2)) as session:
+                # llama-swap first; anything short of a matched row lets llama.cpp try for one.
+                swap = await self._probe_llama_swap(session, v.llama_swap_url, model_id) if v.llama_swap_url else None
+                if swap is not None and swap[1] is not None:
+                    return swap
+                cpp = await self._probe_llamacpp(session, v.llamacpp_url, model_id) if v.llamacpp_url else None
+                if cpp is not None and cpp[1] is not None:
+                    return cpp
+                return swap or cpp
+        except Exception:  # noqa: BLE001
+            return None
+
+    @staticmethod
+    async def _probe_llama_swap(
+        session: aiohttp.ClientSession, base_url: str, model_id: str, headers: dict[str, str] | None = None
+    ) -> tuple[int, str | None] | None:
+        """llama-swap: the called model's live window, else the --ctx-size of its launch command.
+
+        /running lists the running models. When the called one is `ready`, /props?model= is proxied
+        to its llama-server and reports the real n_ctx, including one picked by `--fit` (on by
+        default in llama.cpp) that no launch command shows. A plain /props is refused by llama-swap,
+        and a model that is not ready is never asked (the request would load it).
+        """
+        base = base_url.rstrip("/")
+        try:
+            async with session.get(base + "/running", headers=headers or {}) as resp:
+                data = await resp.json(content_type=None)
+        except Exception:  # noqa: BLE001 - llama-swap down or not JSON: let the llama.cpp probe try
+            return None
+        ready_id = _llama_swap_ready_id(data, model_id)
+        if ready_id is not None:
+            try:
+                async with session.get(f"{base}/props?model={quote(ready_id, safe='')}", headers=headers or {}) as resp:
+                    n_ctx = _props_n_ctx(await resp.json(content_type=None))
+            except Exception:  # noqa: BLE001 - upstream has no /props (e.g. vLLM): use the launch command
+                n_ctx = None
+            if n_ctx is not None:
+                return n_ctx, ready_id
+        return Filter._parse_llama_swap(data, model_id)
+
+    @staticmethod
+    async def _probe_llamacpp(
+        session: aiohttp.ClientSession, base_url: str, model_id: str
+    ) -> tuple[int, str | None] | None:
+        """llama.cpp: /v1/models names each model with its n_ctx; older builds only have /props.
+
+        /props describes the one loaded model, so it is asked only when /v1/models yields no row
+        matched to the called model.
+        """
+        base = base_url.rstrip("/")
+        try:
+            async with session.get(base + "/v1/models") as resp:
+                listed = Filter._parse_llamacpp_models(await resp.json(content_type=None), model_id)
+        except Exception:  # noqa: BLE001 - endpoint missing or not JSON: /props may still answer
+            listed = None
+        if listed is not None and listed[1] is not None:
+            return listed
+        try:
+            async with session.get(base + "/props") as resp:
+                props = Filter._parse_llamacpp_props(await resp.json(content_type=None), model_id)
+        except Exception:  # noqa: BLE001 - /props down or not JSON: keep what /v1/models gave
+            props = None
+        if props is not None and props[1] is not None:
+            return props
+        return listed or props
+
+    @staticmethod
+    def _parse_llamacpp_models(data: object, model_id: str) -> tuple[int, str | None] | None:
+        """Match the called model in a llama.cpp /v1/models payload (id or alias -> meta.n_ctx)."""
+        rows = data.get("data") if isinstance(data, dict) else None
+        if not isinstance(rows, list):
+            return None
+        found: list[tuple[list[str], int]] = []
+        for row in rows:
+            advertised = _advertised_context(row)
+            if advertised is None:
+                continue
+            aliases = row.get("aliases")
+            ids = [str(row.get("id") or "")] + ([str(a) for a in aliases] if isinstance(aliases, list) else [])
+            found.append((ids, advertised[0]))
+        return _match_running(found, model_id)
+
+    @staticmethod
+    def _parse_llamacpp_props(data: object, model_id: str) -> tuple[int, str | None] | None:
+        """Read n_ctx (top-level or in generation settings) from /props, naming the model it belongs to.
+
+        The model is named by its alias or by its GGUF file name (what llama.cpp lists as the id when
+        no alias is set), so a match can outrank the tables like a /v1/models row.
+        """
+        n_ctx = _props_n_ctx(data)
+        if n_ctx is None or not isinstance(data, dict):
+            return None
+        path = str(data.get("model_path") or "")
+        ids = [str(data.get("model_alias") or ""), path, re.split(r"[\\/]", path)[-1].removesuffix(".gguf")]
+        return _match_running([(ids, n_ctx)], model_id)
+
+    @staticmethod
+    def _parse_llama_swap(data: object, model_id: str) -> tuple[int, str | None] | None:
+        """Extract --ctx-size of the model OWUI called from a llama-swap /running payload.
+
+        llama-swap can run several models at once (groups), each row naming its `model` id, so the
+        row is matched to `model_id` (see _match_running). A single unmatched row is still returned,
+        flagged as unmatched, since the ids may legitimately differ (an alias); several rows with no
+        match yield None rather than another model's window.
+        """
+        rows = data.get("running", []) if isinstance(data, dict) else data
+        if not isinstance(rows, list):
+            return None
+        found: list[tuple[list[str], int]] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            cmd = row.get("cmd") or row.get("command") or ""
+            if isinstance(cmd, list):
+                cmd = " ".join(str(c) for c in cmd)
+            match = re.search(r"--ctx-size[= ]+(\d+)", str(cmd))
+            if match:
+                found.append(([str(row.get("model") or "")], int(match.group(1))))
+        return _match_running(found, model_id)
+
+    def _context_size_map_table(self) -> dict[str, int]:
+        """Parse the user's context_size_map valve into {model-substring(lower) -> tokens}. Non-fatal.
+
+        Mirrors _price_map_table: a per-entry-tolerant parse (one bad value drops only that entry,
+        not the whole map). Applied as its own resolution tier ABOVE models.dev in
+        _context_size_for, so an explicit user override beats the automatic remote lookup — exactly
+        like price_map wins over models.dev for cost.
+        """
+        raw = self.valves.context_size_map
+        if not raw:
+            return {}
+        try:
+            user_map = json.loads(raw)
+        except ValueError:  # malformed JSON (JSONDecodeError); valves guarantee a str
+            return {}
+        if not isinstance(user_map, dict):
+            return {}
+        result: dict[str, int] = {}
+        for key, val in user_map.items():
+            try:
+                result[str(key).lower()] = int(val)
+            except (TypeError, ValueError, OverflowError):  # OverflowError: JSON Infinity
+                continue
+        return result
+
+    def _context_table(self) -> dict[str, Any]:
+        """Static context table (offline default).
+
+        The user's context_size_map is NO longer merged here — it is resolved as a higher-priority
+        tier in _context_size_for (above models.dev), so merging it into the static fallback would
+        be dead code. A copy is returned so callers can't mutate the module-level table.
+        """
+        return dict(_STATIC_CONTEXT_SIZES)
+
+    # --- cost ------------------------------------------------------------------
+
+    async def _resolve_cost(
+        self, usage: dict[str, Any] | None, tokens: dict[str, Any], messages: list[Any], model_id: str
+    ) -> dict[str, Any]:
+        """Cost of this message + running chat total. Native (provider) first, else estimate.
+
+        cost_mode: off -> nothing; auto -> native only (no fetch/estimate);
+        estimate -> native first, else approximate from models.dev prices (marked ≈).
+        """
+        result: dict[str, Any] = {"message": None, "message_est": False, "cumulative": None, "cumulative_est": False}
+        mode = self.valves.cost_mode
+        if mode == "off":
+            return result
+
+        native, native_key = self._native_cost(usage)
+        price = None
+        price_prov = {"source": "none", "matched_key": None}
+        if native is not None:
+            result["message"] = native
+        elif mode == "estimate":
+            price, price_prov = await self._resolve_price(model_id)
+            est = self._estimate_cost(tokens, price)
+            if est is not None:
+                result["message"] = est
+                result["message_est"] = True
+
+        unpriced = None  # turns the chat total could not price; None = the total was not computed
+        if self.valves.show_cumulative_cost:
+            if price is None and mode == "estimate":
+                price, price_prov = await self._resolve_price(model_id)
+            result["cumulative"], result["cumulative_est"], unpriced = self._cumulative_cost(
+                messages, price if mode == "estimate" else None
+            )
+
+        # Debug-only provenance/breakdown; kept off the hot path when debug is disabled.
+        if self.valves.debug_mode:
+            result["debug"] = {
+                "mode": mode,
+                "native": {"found": native is not None, "value": native, "source_key": native_key},
+                "cost_details": self._native_cost_details(usage),
+                "price": {
+                    "source": price_prov["source"],
+                    "matched_key": price_prov["matched_key"],
+                    "rates_per_1m": price,
+                },
+                "modelsdev": _modelsdev_status(_modelsdev_prices_cache),
+                "breakdown": self._cost_components(tokens, price),
+                "cumulative_unpriced_messages": unpriced,
+            }
+        return result
+
+    async def _resolve_balance(
+        self, model: dict[str, Any] | None, user: dict[str, Any] | None, request: Any
+    ) -> dict[str, Any]:
+        """Remaining OpenRouter account balance (issue #36): {usd, status, key_source, on_openrouter}.
+
+        Asked only when show_balance is on and the viewer may see it (admins, unless
+        balance_for_all_users). The key is openrouter_api_key, else the bearer key of the model's own
+        openrouter.ai connection, and it goes only to _OPENROUTER_CREDITS_URL. Not cached: a cached
+        number would sit unchanged under messages that each cost something. `status` says why
+        nothing is shown; the key itself never leaves this method.
+        """
+        v = self.valves
+        result: dict[str, Any] = {"usd": None, "status": "off", "key_source": None, "on_openrouter": None}
+        if not v.show_balance:
+            return result
+        if not v.balance_for_all_users and (user or {}).get("role") != "admin":
+            result["status"] = "admins_only"
+            return result
+
+        valve_key = v.openrouter_api_key.strip()
+        connection_headers: dict[str, str] = {}
+        # With a valve key and every model allowed, the connection has nothing left to decide.
+        if not (v.balance_on_every_model and valve_key):
+            found = await self._openrouter_connection(model, request)
+            result["on_openrouter"] = found is not None
+            if found is None and not v.balance_on_every_model:
+                result["status"] = "not_openrouter"
+                return result
+            connection_headers = found or {}
+
+        if valve_key:
+            headers, result["key_source"] = {"Authorization": f"Bearer {valve_key}"}, "valve"
+        elif connection_headers:
+            headers, result["key_source"] = connection_headers, "connection"
+        else:
+            result["status"] = "no_key"
+            return result
+        result["usd"], result["status"] = await self._fetch_openrouter_balance(headers)
+        return result
+
+    async def _openrouter_connection(self, model: dict[str, Any] | None, request: Any) -> dict[str, str] | None:
+        """Auth headers of the model's OWUI connection when it is openrouter.ai ({} without a bearer key), else None.
+
+        The connection is found the way the tier-4 context probe finds it (urlIdx of the model or of a
+        workspace model's base entry). Judged by the URL's host, so a proxy whose URL merely mentions
+        openrouter.ai is not taken for it.
+        """
+        if not isinstance(model, dict):
+            return None
+        entry = model if isinstance(model.get("openai"), dict) else self._base_model_entry(model, request)
+        url_idx = entry.get("urlIdx") if entry is not None else None
+        if not isinstance(url_idx, int) or isinstance(url_idx, bool):
+            return None
+        connection = await self._owui_connection(url_idx, request)
+        if connection is None:
+            return None
+        host = _url_host(connection[0])
+        return connection[1] if host == "openrouter.ai" or host.endswith(".openrouter.ai") else None
+
+    @staticmethod
+    async def _fetch_openrouter_balance(headers: dict[str, str]) -> tuple[float | None, str]:
+        """(total_credits - total_usage, "ok") from OpenRouter's /credits, else (None, why).
+
+        Any API key of the account is accepted there (checked 2026-11-03), although OpenRouter's docs
+        ask for a management key. A refusal is reported with OpenRouter's own code and message.
+        """
+        if not _AIOHTTP_AVAILABLE:
+            return None, "aiohttp_unavailable"
+        try:
+            async with (
+                aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=2)) as session,
+                session.get(_OPENROUTER_CREDITS_URL, headers=headers) as resp,
+            ):
+                payload = await resp.json(content_type=None)
+        except Exception as exc:  # noqa: BLE001 - timeout, network or a non-JSON reply: the line just omits the balance
+            return None, f"error: {type(exc).__name__}"
+        body: dict[str, Any] = payload if isinstance(payload, dict) else {}
+        data = body.get("data")
+        if isinstance(data, dict):
+            total, used = _num(data.get("total_credits")), _num(data.get("total_usage"))
+            if total is not None and used is not None:
+                return float(total - used), "ok"
+        error = body.get("error")
+        if isinstance(error, dict):
+            return None, f"error {error.get('code')}: {str(error.get('message'))[:_ERROR_MESSAGE_CHARS]}"
+        return None, "malformed_response"
+
+    @staticmethod
+    def _cumulative_cost(messages: list[Any], price: dict[str, Any] | None) -> tuple[float | None, bool, int]:
+        """Chat cost total over every assistant turn on the branch, whether it is approximate, unpriced turns.
+
+        Native cost wins per message; a message without it is estimated only when `price` is given
+        (estimate mode). None when no message contributed at all. A turn that reports tokens (more than
+        zero) but gets no cost (no native cost and no price for it) leaves the sum short, so it is counted and the
+        total is marked approximate; a turn without token counts is skipped silently, like the chat
+        token total does (unsaved chats carry no history usage at all).
+        """
+        total = 0.0
+        seen = False
+        any_est = False
+        unpriced = 0
+        for m in messages:
+            usage = m.get("usage") if isinstance(m, dict) and m.get("role") == "assistant" else None
+            if not isinstance(usage, dict):
+                continue
+            cost, _ = Filter._native_cost(usage)
+            estimated = cost is None
+            bag = Filter._usage_token_bag(usage)
+            if estimated and price:
+                cost = Filter._estimate_cost(bag, price)
+            if cost is not None:
+                total += cost
+                seen = True
+                any_est = any_est or estimated
+            elif (bag["input"] or 0) + (bag["output"] or 0) > 0:  # a measured 0/0 turn costs nothing: nothing missing
+                unpriced += 1
+        return (total if seen else None), any_est or unpriced > 0, unpriced
+
+    @staticmethod
+    def _native_cost_details(usage: dict[str, Any] | None) -> dict[str, Any] | None:
+        """Provider cost breakdown when present, e.g. OpenRouter `cost_details`.
+
+        OpenRouter reports `usage.cost_details` alongside `usage.cost` — typically
+        `upstream_inference_cost` (what the upstream provider charged) and `cache_discount`.
+        The displayed cost uses the authoritative top-level `cost`; this is diagnostics only,
+        showing the provider vs upstream split. Numeric values only, so it stays serializable.
+        """
+        if not isinstance(usage, dict):
+            return None
+        details = usage.get("cost_details")
+        if not isinstance(details, dict):
+            return None
+        cleaned = {k: v for k, v in details.items() if _num(v) is not None}
+        return cleaned or None
+
+    @staticmethod
+    def _native_cost(usage: dict[str, Any] | None) -> tuple[float | None, str | None]:
+        """Provider/proxy-reported cost + the key it came from (OpenRouter, LiteLLM, ...)."""
+        if not isinstance(usage, dict):
+            return None, None
+        for key in ("cost", "total_cost"):
+            val = _num(usage.get(key))
+            if val is not None:
+                return float(val), key
+        inp = _first_num(usage, "input_cost", "prompt_cost")
+        out = _first_num(usage, "output_cost", "completion_cost")
+        if inp is not None or out is not None:
+            return float((inp or 0) + (out or 0)), "input_cost+output_cost"
+        return None, None
+
+    @staticmethod
+    def _usage_token_bag(usage: object) -> dict[str, Any]:
+        """Minimal cache-aware token bag from a usage dict (for cost of historical messages)."""
+        bag: dict[str, Any] = {
+            "input": None,
+            "output": None,
+            "cached": None,
+            "cache_write": None,
+            "is_anthropic": False,
+            "input_has_cache": False,
+            "fresh_input": None,
+        }
+        if not isinstance(usage, dict):
+            return bag
+        bag["input"] = _first_num(usage, "input_tokens", "prompt_tokens", "prompt_eval_count", "prompt_n")
+        bag["output"] = _first_num(usage, "output_tokens", "completion_tokens", "eval_count", "predicted_n")
+        cache = Filter._cache_and_fresh(usage, bag["input"])
+        bag["cached"] = cache["cached"]
+        bag["cache_write"] = cache["cache_write"]
+        bag["is_anthropic"] = cache["is_anthropic"]
+        bag["input_has_cache"] = cache["input_has_cache"]
+        bag["fresh_input"] = cache["fresh_input"]
+        return bag
+
+    @staticmethod
+    def _cost_components(bag: dict[str, Any], price: dict[str, Any] | None) -> dict[str, Any] | None:
+        """Per-component token counts + USD from a token bag and per-1M price dict.
+
+        Single source of truth for the cost math: `_estimate_cost` returns its `total_usd`,
+        and the debug breakdown shows its parts. None if the cost is not computable.
+        """
+        if not price:
+            return None
+        p_in = _num(price.get("input"))
+        p_out = _num(price.get("output"))
+        if p_in is None and p_out is None:
+            return None
+        p_in = p_in or 0.0
+        p_out = p_out or 0.0
+        p_cache_read = _num(price.get("cache_read"))
+        if p_cache_read is None:
+            p_cache_read = p_in
+        p_cache_write = _num(price.get("cache_write"))
+        if p_cache_write is None:
+            p_cache_write = p_in
+
+        # fresh_input = uncached, full-price input (cache already subtracted for subset shapes).
+        # Uniform formula: cache read/write always priced at their own rates on top of fresh input.
+        fresh = bag.get("fresh_input")
+        if fresh is None:
+            fresh = bag.get("input")
+        fresh = fresh or 0
+        out = bag.get("output") or 0
+        cached = bag.get("cached") or 0
+        cache_write = bag.get("cache_write") or 0
+        if not (fresh or cached or cache_write or out):
+            return None
+
+        raw_in = fresh * p_in
+        raw_cached = cached * p_cache_read
+        raw_cache_write = cache_write * p_cache_write
+        raw_out = out * p_out
+        total = (raw_in + raw_cached + raw_cache_write + raw_out) / 1_000_000.0
+
+        return {
+            "is_anthropic": bool(bag.get("is_anthropic")),
+            "input_has_cache": bool(bag.get("input_has_cache")),
+            "tokens": {
+                "input": bag.get("input"),
+                "billable_in": fresh,
+                "cached": cached,
+                "cache_write": cache_write,
+                "output": out,
+            },
+            "usd_per_component": {
+                "input": round(raw_in / 1_000_000.0, 8),
+                "cached": round(raw_cached / 1_000_000.0, 8),
+                "cache_write": round(raw_cache_write / 1_000_000.0, 8),
+                "output": round(raw_out / 1_000_000.0, 8),
+            },
+            "total_usd": total,
+        }
+
+    @staticmethod
+    def _estimate_cost(bag: dict[str, Any], price: dict[str, Any] | None) -> float | None:
+        """Estimate USD from a token bag and a per-1M price dict. None if not computable."""
+        components = Filter._cost_components(bag, price)
+        return components["total_usd"] if components else None
+
+    async def _resolve_price(self, model_id: str) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+        """Per-1M price + provenance ({source, matched_key}): manual map -> models.dev -> static.
+
+        Provenance is debug-only; the returned price is what the hot path uses. The admin's price_map
+        matches by substring (its keys are the admin's own choice); models.dev and the built-in table
+        match only the exact id or the id without a provider prefix (_price_key, issue #49).
+        """
+        table = self._price_map_table()
+        key = _longest_key_match(table, model_id)
+        if key is not None and table[key]:
+            return table[key], {"source": "price_map", "matched_key": key}
+        if self.valves.fetch_prices_from_modelsdev:
+            mtable = await self._modelsdev_prices_map()
+            mkey = _price_key(mtable, model_id)
+            if mkey is not None and mtable[mkey]:
+                return mtable[mkey], {"source": "modelsdev", "matched_key": mkey}
+        skey = _price_key(_STATIC_PRICES, model_id)
+        if skey is not None:
+            return _STATIC_PRICES[skey], {"source": "static", "matched_key": skey}
+        return None, {"source": "none", "matched_key": None}
+
+    def _price_map_table(self) -> dict[str, Any]:
+        """Parse the user's price_map valve into {model-substring(lower) -> price dict}. Non-fatal."""
+        raw = self.valves.price_map
+        if not raw:
+            return {}
+        try:
+            user_map = json.loads(raw)
+        except ValueError:  # malformed JSON (JSONDecodeError); valves guarantee a str
+            return {}
+        if not isinstance(user_map, dict):
+            return {}
+        return {str(k).lower(): v for k, v in user_map.items() if isinstance(v, dict)}
+
+    async def _modelsdev_prices_map(self) -> dict[str, Any]:
+        """Fetch and cache {model_id -> price dict} from models.dev api.json. Non-fatal."""
+        now = time.time()
+        cached_map = _modelsdev_prices_cache.get("map")
+        if cached_map is not None and _modelsdev_prices_cache.get("expiry", 0) > now:
+            return cached_map  # type: ignore[no-any-return]
+
+        data, status = await _fetch_modelsdev(self.valves.modelsdev_api_url)
+        result = self._parse_prices(data)
+
+        ttl = self.valves.modelsdev_ttl if result else min(300, self.valves.modelsdev_ttl)
+        _modelsdev_prices_cache.update(
+            map=result,
+            expiry=now + max(60, ttl),
+            status="empty" if status == "ok" and not result else status,
+            fetched_at=now,
+        )
+        return result
+
+    @staticmethod
+    def _parse_prices(data: object) -> dict[str, Any]:
+        """Flatten models.dev api.json to {model_id(lower) -> price}. Tolerant of shape.
+
+        Expected: {provider: {"models": {model_id: {..., "cost": {...}}}}}; also accepts a
+        flat {model_id: {..., "cost": {...}}}. Prices are USD per 1M tokens.
+        """
+        entries: list[tuple[object, object]] = []  # (model id, raw cost) in file order
+        for pid, prov in (data if isinstance(data, dict) else {}).items():
+            if not isinstance(prov, dict):
+                continue
+            if isinstance(prov.get("models"), dict):
+                entries.extend(
+                    (entry.get("id", mid), entry.get("cost"))
+                    for mid, entry in prov["models"].items()
+                    if isinstance(entry, dict)
+                )
+            elif "cost" in prov:
+                entries.append((prov.get("id", pid), prov.get("cost")))
+
+        out: dict[str, Any] = {}
+        for model_id, cost in entries:
+            price = Filter._price_entry(cost)
+            if price is None:
+                continue
+            key = str(model_id).lower()
+            out.setdefault(key, price)
+            out.setdefault(key.split("/")[-1], price)
+        return out
+
+    @staticmethod
+    def _price_entry(cost: object) -> dict[str, Any] | None:
+        """Numeric per-1M rates of one models.dev `cost` object; None without an input or output rate."""
+        if not isinstance(cost, dict):
+            return None
+        price = {field: val for field in _PRICE_FIELDS if (val := _num(cost.get(field))) is not None}
+        return price if ("input" in price or "output" in price) else None
+
+    # --- display ---------------------------------------------------------------
+
+    @staticmethod
+    def _build_stats(stats: _Stats) -> list[str]:
+        """Assemble the stats parts in the resolved metric order.
+
+        show_* still gates visibility (each renderer returns None when off/no-data);
+        display_order only reorders. Empty order -> byte-identical to the old output.
+        """
+        order = _resolve_display_order(getattr(stats.valves, "display_order", "") or "")
+
+        rendered: list[tuple[str, str]] = []  # (key, part) — key kept for the source guard
+        for key in order:
+            render = _STATS_RENDERERS.get(key)
+            if render is None:
+                continue
+            part = render(stats)
+            if part is not None:
+                rendered.append((key, part))
+
+        # Preserve the old guard: the data-source suffix is not shown on its own.
+        if all(key == "source" for key, _ in rendered):
+            rendered = [(k, p) for k, p in rendered if k != "source"]
+        return [part for _, part in rendered]
+
+    @staticmethod
+    def _provider_guess(model: dict[str, Any] | None, model_id: str) -> str:
+        """Best-effort provider label from outlet-visible fields (no base_url/api-key exist here).
+
+        Ollama and an admin-set `provider` are authoritative; otherwise the family is inferred from the
+        model-id substring — the same thing that drives cost/context matching. A connection the admin marked
+        "local" (llama.cpp, LM Studio, ...; `connection_type` is in the payload as well) is labelled "local"
+        only when the id names no family.
+        """
+        m = model if isinstance(model, dict) else {}
+        owned = (m.get("owned_by") or "").lower()
+        conn = (m.get("connection_type") or "").lower()
+        provider = m.get("provider") or ""
+        if owned == "ollama":
+            return "ollama/local"
+        if owned == "arena":
+            return "arena"
+        if provider:
+            return str(provider)
+        mid = (model_id or "").lower()
+        families = [
+            ("openrouter", "openrouter"),
+            ("litellm", "litellm"),
+            ("anthropic", "anthropic"),
+            ("claude", "anthropic"),
+            ("gemini", "google"),
+            ("deepseek", "deepseek"),
+            ("grok", "xai"),
+            ("codestral", "mistral"),
+            ("devstral", "mistral"),
+            ("magistral", "mistral"),
+            ("pixtral", "mistral"),
+            ("mistral", "mistral"),
+            ("qwen", "qwen"),
+            ("qwq", "qwen"),
+            ("kimi", "moonshot"),
+            ("glm", "zhipu"),
+            ("minimax", "minimax"),
+            ("command", "cohere"),
+            ("llama", "meta"),
+            ("gpt", "openai"),
+            ("openai", "openai"),
+        ]
+        for needle, label in families:
+            if needle in mid:
+                return label
+        if conn == "local":
+            return "local"
+        return owned or "unknown"
+
+    def _sanitize_model(
+        self, model: dict[str, Any] | None, metadata: dict[str, Any] | None, resolved_id: str
+    ) -> dict[str, Any]:
+        """Whitelist of shareable model/provider fields — NO secrets, prompt, user ids, or grants.
+
+        Only known-safe keys are copied out; raw __model__/__metadata__ (which carry user_message,
+        user_id, session_id, access_grants, the full ollama/openai model dict, ...) never leak here.
+        OWUI strips generation params from info.params before outlet (0.12.0+ keeps only the
+        model_controls UI metadata there, 0.12.5 also compact_token_threshold), so they are unavailable — surfaced
+        explicitly via gen_params_available rather than silently omitted.
+        """
+        m = model if isinstance(model, dict) else {}
+        info_raw = m.get("info")
+        info: dict[str, Any] = info_raw if isinstance(info_raw, dict) else {}
+        meta = info.get("meta")
+        caps = meta.get("capabilities") if isinstance(meta, dict) else None
+        params: dict[str, Any] = {}
+        function_calling = None
+        if isinstance(metadata, dict) and isinstance(metadata.get("params"), dict):
+            mp = metadata["params"]
+            params = {
+                "reasoning_tags": mp.get("reasoning_tags"),
+                "compact_token_threshold": mp.get("compact_token_threshold"),
+                "stream_delta_chunk_size": mp.get("stream_delta_chunk_size"),
+            }
+            function_calling = mp.get("function_calling")
+        return {
+            "resolved_id": resolved_id or None,
+            "id": m.get("id"),
+            "name": m.get("name"),
+            "base_model_id": info.get("base_model_id"),
+            "owned_by": m.get("owned_by"),
+            "connection_type": m.get("connection_type"),
+            "provider": m.get("provider"),
+            "preset": bool(m.get("preset")) if "preset" in m else None,
+            "is_pipe": bool(m.get("pipe")),
+            "has_url_idx": "urlIdx" in m,
+            "backend_context": self._backend_context_debug(m),
+            "live_backend": _live_backend(m),
+            "provider_guess": self._provider_guess(m, resolved_id),
+            # The model's own switches that decide whether anything shows: with status_updates off OWUI never
+            # renders the stats line, with citations off never this debug source, and without usage it does
+            # not ask a streaming provider for token counts (-> tiktoken estimates). null = not set (default).
+            "capabilities": (
+                {key: caps.get(key) for key in ("status_updates", "citations", "usage")}
+                if isinstance(caps, dict)
+                else None
+            ),
+            "loaded": m.get("loaded") if isinstance(m.get("loaded"), bool) else None,
+            "function_calling": function_calling,
+            "owui_params": params,
+            "gen_params_available": False,
+            "note": "generation params (temperature/top_p/max_tokens/system/reasoning) removed by OWUI before outlet",
+        }
+
+    @staticmethod
+    def _backend_context_debug(model: dict[str, Any]) -> dict[str, Any] | None:
+        """Context numbers from the model's own /v1/models row: the running window vs the trained one."""
+        raw = model.get("openai")
+        row: dict[str, Any] = raw if isinstance(raw, dict) else model
+        raw_meta = row.get("meta")
+        meta: dict[str, Any] = raw_meta if isinstance(raw_meta, dict) else {}
+        found = {
+            "n_ctx": _num(meta.get("n_ctx")),
+            "n_ctx_train": _num(meta.get("n_ctx_train")),
+            "max_model_len": _num(row.get("max_model_len")),
+        }
+        return found if any(val is not None for val in found.values()) else None
+
+    def _valves_snapshot(self) -> dict[str, Any]:
+        """Full valve dump for reproducing issues; the two local-backend URLs and the OpenRouter key are masked."""
+        try:
+            data = self.valves.model_dump()
+        except Exception:  # noqa: BLE001 - debug output runs unguarded in outlet and must not break the response
+            return {}
+        for key in ("llamacpp_url", "llama_swap_url", "openrouter_api_key"):
+            if data.get(key):
+                data[key] = "******"
+        return data
+
+    @staticmethod
+    def _web_search_debug(assistant_msg: dict[str, Any]) -> dict[str, Any]:
+        """Hint whether the response used server-side web search (url_citation -> OWUI `sources`).
+
+        Why it matters for cost: Open-WebUI-orchestrated tool/MCP calls are pure tokens and already
+        summed into `usage.cost`. But a provider's OWN server-side web search / tools (OpenRouter's
+        `web` plugin / `openrouter:web_search`, `:online`) can add a surcharge on top of tokens, and a
+        BYOK engine (e.g. Firecrawl) bills entirely outside the OpenRouter generation. So when a
+        response carries web citations, the shown cost may be incomplete — cross-check the provider's
+        Activity page. This is a diagnostic flag only; it never changes the displayed number.
+
+        Detection is conservative: OWUI turns `url_citation` annotations into `sources` whose entries
+        carry an http(s) URL (RAG/file sources do not), so an http host is the tell-tale of web search.
+        """
+        sources = assistant_msg.get("sources")
+        hosts: list[str] = []
+        if isinstance(sources, list):
+            for src in sources:
+                if not isinstance(src, dict):
+                    continue
+                candidates: list[Any] = []
+                inner = src.get("source")
+                if isinstance(inner, dict):
+                    candidates.append(inner.get("url"))
+                meta = src.get("metadata")
+                if isinstance(meta, list):
+                    for m in meta:
+                        if isinstance(m, dict):
+                            candidates.extend((m.get("source"), m.get("url")))
+                host = next((h for h in (_url_host(c) for c in candidates if isinstance(c, str)) if h), "")
+                if host:
+                    hosts.append(host)
+        return {
+            "detected": bool(hosts),
+            "citation_count": len(hosts),
+            "domains": sorted(set(hosts))[:10],
+            "note": (
+                "Response has web-search citations; a provider-side search/tool surcharge may not be "
+                "fully in usage.cost (BYOK engines bill outside OpenRouter). Cross-check the Activity page."
+                if hosts
+                else None
+            ),
+        }
+
+    async def _emit_debug(self, emit: Callable[[dict[str, Any]], Awaitable[None]], turn: _Turn, stats: _Stats) -> None:
+        """Diagnostics for troubleshooting, in a copyable form.
+
+        A chat status line is clamped to one line inside a toggle button, so it cannot show the raw
+        JSON. The stats line only carries a small `(debug)` marker; the full payload is emitted
+        two ways:
+          1. a `citation` event -> a "Token Usage & Cost Display - Debug info" source whose modal renders
+             the JSON in a ```json code block WITH a Copy button (persisted with the message). OWUI's modal
+             cuts content above 10,000 characters behind a "Show all" button, and with the user setting
+             "render Markdown in previews" off it shows plain text without a Copy button;
+          2. the server/container stdout (`docker logs`) as the never-truncated fallback.
+        """
+        content = turn.assistant_msg.get("content")
+        output = turn.assistant_msg.get("output")
+        resolved_id = _resolve_model_id(stats.model)
+
+        size = stats.ctx.get("size")
+        used = stats.ctx.get("used")
+        percent = round((used / size) * 100, 2) if (size and used is not None) else None
+        context_debug = {
+            "source": stats.ctx.get("source"),
+            "matched_key": stats.ctx.get("matched_key"),
+            "size": size,
+            "used": used,
+            "used_source": stats.ctx.get("used_source"),
+            "used_est": stats.ctx.get("used_est"),
+            "percent": percent,
+            "modelsdev": _modelsdev_status(_modelsdev_cache),
+        }
+
+        display_order_debug = _display_order_debug(self.valves.display_order or "")
+
+        payload = {
+            "task": turn.task,
+            "messages_count": len(turn.messages),
+            "assistant_keys": sorted(turn.assistant_msg.keys()),
+            "usage": turn.usage,
+            "output_types": (
+                [item.get("type") for item in output if isinstance(item, dict)] if isinstance(output, list) else None
+            ),
+            "content_len": len(content) if isinstance(content, str) else -1,
+            "finish_reason": stats.finish_reason,
+            "model": self._sanitize_model(stats.model, turn.metadata, resolved_id),
+            "tokens": stats.tokens,
+            "timing": stats.timing,
+            # From the `request` hook (OWUI 0.11.2+); null = not called, so the wall clock started at inlet.
+            "model_calls": (turn.metadata or {}).get("_tud_model_calls"),
+            "cost": {k: val for k, val in stats.cost.items() if k != "debug"},
+            "cost_debug": stats.cost.get("debug"),
+            "balance": stats.balance,
+            "cumulative_tokens_debug": self._cumulative_tokens(turn.messages, turn.assistant_msg, stats.tokens),
+            "web_search": self._web_search_debug(turn.assistant_msg),
+            "context_debug": context_debug,
+            "display_order": display_order_debug,
+            "tiktoken": _TIKTOKEN_AVAILABLE,
+            "valves": self._valves_snapshot(),
+        }
+        try:
+            pretty = json.dumps(payload, default=str, ensure_ascii=False, indent=2)
+        except Exception as exc:  # noqa: BLE001 - same unguarded-debug rule as _valves_snapshot
+            pretty = f"serialization error: {exc}"
+
+        # 1) In-chat, copyable: a citation renders the JSON in a modal (titled from source.name) with a
+        #    Copy button. The payload MUST NOT carry a top-level `type` key or the backend does not
+        #    persist it.
+        await emit(
+            {
+                "type": "citation",
+                "data": {
+                    "source": {"name": "Token Usage & Cost Display - Debug info"},
+                    "document": [f"```json\n{pretty}\n```"],
+                    "metadata": [{"source": "Token Usage & Cost Display - Debug info"}],
+                },
+            }
+        )
+        # 2) Copyable fallback -> container stdout (docker logs / uvicorn console).
+        print(f"[TUD debug]\n{pretty}", flush=True)  # noqa: T201 - intentional debug channel

@@ -1,0 +1,10 @@
+# Server runtime — pinned to the versions verified on 2026-11-21 (13 unit tests + e2e via
+# Open WebUI's MCP client). Bump deliberately and re-run test_server.py.
+fastmcp==2.14.7
+mcp==1.30.0
+starlette==1.10.0
+uvicorn==0.54.0
+httpx==0.28.1
+minio==7.2.20
+beautifulsoup4==4.15.0
+lxml==6.1.3

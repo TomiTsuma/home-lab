@@ -1,0 +1,16 @@
+[Unit]
+Description=Harbor boot recovery (waits for DB readiness, re-applies docker compose up -d)
+After=docker.service network-online.target
+Requires=docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/harbor-boot-recover.sh
+TimeoutStartSec=600
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
