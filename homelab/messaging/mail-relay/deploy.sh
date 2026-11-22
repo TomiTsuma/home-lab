@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # Create or update the "mail-relay" custom app on TrueNAS from docker-compose.yml.
 #
-# Usage: ./deploy.sh            (reads CF_EMAIL_API_TOKEN from ./.env)
+# Usage: ./deploy.sh            (reads BREVO_SMTP_LOGIN / BREVO_SMTP_KEY from ./.env)
 #
 # Runs midclt over SSH as truenas_admin (in builtin_administrators, so no sudo).
-# The rendered compose (with the token) only exists in a pipe and inside TrueNAS's
-# root-only app config; it is never written to disk on this machine.
+# The rendered compose (with the key) is never written on this machine; on TrueNAS
+# it sits in a mktemp file for the few seconds of the call, then only in the
+# root-only app config.
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -13,7 +14,8 @@ TRUENAS="${TRUENAS:-truenas_admin@100.100.133.10}"
 APP=mail-relay
 
 [ -f .env ] && set -a && . ./.env && set +a
-: "${CF_EMAIL_API_TOKEN:?set CF_EMAIL_API_TOKEN in .env (see .env.example)}"
+: "${BREVO_SMTP_LOGIN:?set BREVO_SMTP_LOGIN in .env (see .env.example)}"
+: "${BREVO_SMTP_KEY:?set BREVO_SMTP_KEY in .env (see .env.example)}"
 
 python3 - "$APP" <<'PY' | ssh "$TRUENAS" 'f=$(mktemp); cat > "$f"; python3 - "$f" <<"EOF"
 import json, subprocess, sys
@@ -30,6 +32,8 @@ print("done")
 EOF
 rm -f "$f"'
 import json, os, sys
-compose = open("docker-compose.yml").read().replace("${CF_EMAIL_API_TOKEN}", os.environ["CF_EMAIL_API_TOKEN"])
+compose = open("docker-compose.yml").read()
+for var in ("BREVO_SMTP_LOGIN", "BREVO_SMTP_KEY"):
+    compose = compose.replace("${" + var + "}", os.environ[var])
 print(json.dumps({"app_name": sys.argv[1], "custom_app": True, "custom_compose_config_string": compose}))
 PY

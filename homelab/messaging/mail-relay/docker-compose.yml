@@ -1,11 +1,11 @@
 # Outbound mail relay for the homelab (TrueNAS custom app "mail-relay").
 #
 # Apps on the LAN / tailnet / WireGuard meshes submit mail to TrueNAS:587 with no
-# auth; Postfix relays it to Cloudflare Email Service over implicit TLS (465),
-# which signs it with DKIM for ereuna.org. See README.md in this folder.
+# auth; Postfix relays it to Brevo (free plan) over STARTTLS, and Brevo signs it
+# with DKIM for ereuna.org. See README.md in this folder.
 #
-# TrueNAS custom apps do not read a .env file, so deploy.sh renders
-# the token placeholder below from .env before calling app.create / app.update.
+# TrueNAS custom apps do not read a .env file, so deploy.sh fills in the two
+# credential placeholders below from .env before calling app.create / app.update.
 services:
   postfix:
     image: boky/postfix:5.2.1-alpine
@@ -15,24 +15,23 @@ services:
     ports:
       - "587:587"
     environment:
-      # --- Upstream: Cloudflare Email Service SMTP (implicit TLS only, no STARTTLS) ---
-      RELAYHOST: "[smtp.mx.cloudflare.net]:465"
-      RELAYHOST_USERNAME: "api_token"
-      RELAYHOST_PASSWORD: "${CF_EMAIL_API_TOKEN}"
-      POSTFIX_smtp_tls_wrappermode: "yes"
+      # --- Upstream: Brevo SMTP relay (587 + STARTTLS, AUTH PLAIN/LOGIN) ---
+      RELAYHOST: "[smtp-relay.brevo.com]:587"
+      RELAYHOST_USERNAME: "${BREVO_SMTP_LOGIN}"
+      RELAYHOST_PASSWORD: "${BREVO_SMTP_KEY}"
       POSTFIX_smtp_tls_security_level: "encrypt"
       POSTFIX_smtp_sasl_mechanism_filter: "plain, login"
       # --- Who may send through us ---
-      # Cloudflare only accepts From/envelope addresses on onboarded domains.
+      # Brevo only accepts From addresses on authenticated domains/senders.
       ALLOWED_SENDER_DOMAINS: "ereuna.org"
       # Private ranges + Tailscale CGNAT. 10/8 covers wgbak (10.77) and wgaz (10.78).
       # Port 587 is NOT forwarded on the router, so this is never internet-facing.
       POSTFIX_mynetworks: "127.0.0.0/8,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,100.64.0.0/10"
-      # Cloudflare caps a message at 25 MiB.
-      POSTFIX_message_size_limit: "26214400"
+      # Brevo's server advertises SIZE 20971520 (20 MiB).
+      POSTFIX_message_size_limit: "20971520"
       TZ: "Africa/Nairobi"
     volumes:
-      # Persist the queue so mail waiting on a Cloudflare outage survives restarts.
+      # Persist the queue so mail waiting on an upstream outage survives restarts.
       - mail-relay-spool:/var/spool/postfix
     deploy:
       resources:

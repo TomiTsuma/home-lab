@@ -81,7 +81,7 @@ anything outside TrueNAS (reverse proxy, firewall rule) hardcodes one.
 | lazylibrarian | RUNNING | linuxserver/lazylibrarian | 31089 | `data-store/audiobooks` → `/books` |
 | seerr2 | RUNNING | ghcr.io/seerr-team/seerr:v3.4.1 | 30303 | config |
 | tdarr | RUNNING (as of 2026-11-07 — was STOPPED/uncertain at the 2026-11-05 audit) | ghcr.io/haveagitgat/tdarr:3.06.00 | 30088 (Web UI), 30029 (server/API) | `data-store/media` → `/media`, `data-store/tdarr-cache` → `/temp`, `app_mounts/tdarr/{configs,logs,server}` — see `tdarr.md` for full config |
-| mail-relay (**custom app**, added 2026-11-22) | RUNNING | boky/postfix:5.2.1-alpine | 587 (SMTP submission, no auth, LAN/tailnet/WG only) | named volume `mail-relay-spool` (queue). Recreate with `homelab/messaging/mail-relay/deploy.sh`, not the catalog |
+| mail-relay (**custom app**, added 2026-11-22) | RUNNING | boky/postfix:5.2.1-alpine, relays via Brevo | 587 (SMTP submission, no auth, LAN/tailnet/WG only) | named volume `mail-relay-spool` (queue). Recreate with `homelab/messaging/mail-relay/deploy.sh`, not the catalog |
 | plex1 | STOPPED | plex:1.43.4 | — | — |
 | seerr | STOPPED | seerr:v3.4.1 (older, superseded by seerr2) | — | — |
 | lyrion-music-server | STOPPED | 9.0.4 | — | — |
