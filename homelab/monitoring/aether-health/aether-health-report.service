@@ -1,0 +1,10 @@
+[Unit]
+Description=Aether (ereuna) daily full health report
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/flock /run/aether-health.lock /usr/bin/python3 /opt/aether-health/aether_health.py --report
+TimeoutStartSec=15min
+Nice=5

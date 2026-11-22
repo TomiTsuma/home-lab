@@ -1,0 +1,11 @@
+[Unit]
+Description=Aether (ereuna) service health check — emails on failure/recovery
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# flock: the 5-minute check and the daily report share one state file, never run them at the same time.
+ExecStart=/usr/bin/flock /run/aether-health.lock /usr/bin/python3 /opt/aether-health/aether_health.py
+TimeoutStartSec=8min
+Nice=5
