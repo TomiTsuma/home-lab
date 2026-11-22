@@ -230,5 +230,14 @@
     "source": "github.com/Haervwe/open-webui-tools@c1fac21ad8d0f25db8d1dd1b60733d3daf250744/tools/arxiv_search_tool.py",
     "description": "Semantic arXiv search (queries go to searchthearxiv.com) + read papers from arxiv.org.",
     "sha256": "c56f94be95a06fb025be00bd0d2f29ca6e6eaac24659d2d95943a6bd423a087e"
+  },
+  {
+    "id": "calendar_planner",
+    "kind": "tool",
+    "file": "src/calendar_planner.py",
+    "name": "Calendar Planner",
+    "source": "own code (homelab/ai/open-webui/plugins/src/calendar_planner.py); no external dependencies",
+    "description": "Draws month/week/day/agenda calendars inline, flags double-bookings, shows proposed plan items, finds free slots. Use with the Google Calendar tools.",
+    "sha256": "8db9362acfaa4034969115d140e9da6cb2e96178b8ead63be846ac284ec2a4b3"
   }
 ]

@@ -125,7 +125,7 @@ set add `?groups=mindmaps,planner,notes,jira,search` to `CHLIO_MCP_URL`.
 the old token in Chlio (Account -> Access tokens, or `cli.js token revoke <id>`) and re-run it with a new one.
 Tested with Open WebUI's own MCP client from inside the container (connects in ~0.7 s, 26 tools, read calls work).
 
-## Google Drive / Docs / Sheets / Slides (`google-workspace-mcp/`)
+## Google Calendar + Drive / Docs / Sheets / Slides (`google-workspace-mcp/`)
 
 **Self-hosted** [`workspace-mcp`](https://github.com/taylorwilsdon/google_workspace_mcp)
 (MIT, pinned `2.6.0`). It calls the regular Google REST APIs.
@@ -137,10 +137,16 @@ Workspace Developer Preview and need the Cloud project enrolled, and the account
 Gmail.
 
 **How it runs**
-- **Mode and scope:** single-user, read-only, `--tool-tier core`, Drive/Docs/Sheets/Slides only.
-  That gives 7 tools at about 3.9k tokens; the full read-only set was 23 tools at about 9.2k:
-  `search_drive_files`, `get_drive_file_content`, `get_drive_file_download_url`,
-  `get_drive_shareable_link`, `get_doc_content`, `read_sheet_values`, `get_presentation`.
+- **Mode and scope (2026-11-22):** single-user, `--tool-tier core`, `--permissions drive:readonly
+  docs:readonly sheets:readonly slides:readonly calendar:full`. Calendar can read AND write; the other
+  four stay read-only. (`--permissions` replaces `--read-only`/`--tools`, which are mutually exclusive
+  with it.) 10 tools, about 7.5k tokens of schema:
+  - Calendar: `list_calendars`, `get_events` (fetch, one event or a range), `manage_event`
+    (create, update, delete, move, RSVP).
+  - Read-only: `search_drive_files`, `get_drive_file_content`, `get_drive_file_download_url`,
+    `get_drive_shareable_link`, `get_doc_content`, `read_sheet_values`, `get_presentation`.
+  - The extended tier would add `query_freebusy`, `manage_calendar`, focus time and out-of-office,
+    but it would also enlarge every other service's tool list, so it is not enabled.
 - **Registration:** registered in Open WebUI as `gworkspace` (auth: none) and default-on for every
   model (`google-workspace-mcp/register_in_openwebui.py`).
 - **Credentials:** the Google refresh token lives in volume `open-webui_gws-data` at
@@ -162,10 +168,90 @@ Gmail.
 sign-in link. Open it in a browser on the tailnet. If the app is External and in Testing, Google
 expires the refresh token after 7 days.
 
-**Read-write later**
-1. Drop `--read-only` from `command:` in compose.
-2. Add the write scopes to the consent screen.
-3. Recreate the container and sign in again.
+**Calendar re-consent.** Moving Calendar from "off" to read/write adds scopes, so the first Calendar
+call returns a Google sign-in link; approve it once (consent screen lists Calendar, Drive/Docs/Sheets/
+Slides read-only). The Google Calendar API must be enabled on the Cloud project.
+
+**Making another service writable later:** change its level in `--permissions` (e.g. `drive:full`),
+recreate the container (`docker compose up -d google-workspace-mcp`) and approve the new consent.
+
+## Calendar planner (`plugins/src/calendar_planner.py`)
+
+Open WebUI's built-in Calendar (`/calendar`, tools `search/create/update/delete_calendar_event`) does
+**not** sync with Google Calendar, and the community catalogue has no calendar renderer, so Google
+Calendar is the source of truth here and this is our own small tool (no external code, no JavaScript in
+its output) that draws it:
+- `render_calendar(events, view, focus_date, title)`: month / week / day / agenda, inline in the chat.
+  Overlapping events get a red outline; events with `"proposed": true` are dashed, so a plan can be
+  previewed before anything is created. Light/dark aware.
+- `find_free_slots(events, date_from, date_to, duration_minutes, day_start, day_end)`: free gaps inside
+  working hours (valves: work-day start/end, skip weekends).
+- Typical planning chat: the model calls `get_events` -> `find_free_slots` -> `render_calendar` with the
+  proposed blocks -> you agree -> it calls `manage_event` once per block.
+- Tests: `python3.11 plugins/test_calendar_planner.py` (37 checks). Installed with `install_plugins.py`;
+  the tool and `server:mcp:gworkspace` are default-on for every model (`default_tools_all_models.py`).
+
+## ClickHouse MCP (`clickhouse-mcp/`)
+
+Official [`mcp-clickhouse`](https://github.com/ClickHouse/mcp-clickhouse) (Apache-2.0, pinned `0.7.0`, PyPI latest on
+2026-11-22) as container `clickhouse-mcp`, registered in Open WebUI as `clickhouse` and default-on for every model.
+**Installed without a ClickHouse target**: until `.env` points it at an instance, tool calls fail with a connection error to
+`localhost:8123` (nothing real is behind that).
+
+- **Tools (about 1k tokens):** `list_databases`, `list_tables` (schema, comments, pagination), `run_query`.
+  Read-only: `CLICKHOUSE_ALLOW_WRITE_ACCESS=false` and `CLICKHOUSE_ALLOW_DROP=false` are hard-coded in compose, so queries
+  run with `readonly=1` on the server. Query timeout 30 s (`CLICKHOUSE_MCP_QUERY_TIMEOUT`), 4 workers.
+- **Protocol:** ClickHouse's **HTTP interface** (8123 plain, 8443 TLS) via clickhouse-connect. The native port 9000 is NOT used,
+  so whatever ClickHouse you run must expose 8123/8443 to aeacus-dl (published port or LAN/Tailscale address).
+- **Isolation:** private Docker network `chmcp` shared only with open-webui; no published port; mandatory bearer token
+  (`CLICKHOUSE_MCP_AUTH_TOKEN`, generated into the chmod-600 `.env`, stored in Open WebUI's config DB by
+  `register_in_openwebui.py`); `Host` header allow-list (a wrong Host gets 421, no token gets 401); read-only rootfs,
+  no capabilities, 512 MB, 128 pids.
+- **Connect it to a ClickHouse (later):** set in `.env` on aeacus-dl, then `docker compose up -d clickhouse-mcp`:
+  `CLICKHOUSE_HOST`, `CLICKHOUSE_PORT` (8123 or 8443), `CLICKHOUSE_USER`, `CLICKHOUSE_PASSWORD`, optionally
+  `CLICKHOUSE_DATABASE`, `CLICKHOUSE_SECURE` (`true` for 8443/TLS), `CLICKHOUSE_VERIFY`. Use a **dedicated** ClickHouse user
+  with only `GRANT SELECT ON <db>.* TO mcp_reader` (the MCP's guard is best-effort; the user's grants are the real boundary).
+  The container reaches LAN/Tailscale addresses through normal Docker NAT (e.g. data-handler `192.168.100.9`).
+- **Open WebUI restart note:** `open-webui` was attached to the `chmcp` network live (`docker network connect`); the compose file
+  also lists it, so a normal `docker compose up -d` keeps it. Re-register after wiping Open WebUI's DB:
+  `docker exec -e CLICKHOUSE_MCP_AUTH_TOKEN=... open-webui python3 /tmp/register_clickhouse.py`.
+- **Current target (2026-11-22): the emergency instance on data-handler (VM 100)**: `100.127.65.29:18123` (Tailscale IP, HTTP,
+  **no TLS**, hence `CLICKHOUSE_SECURE=false`; the hop is still encrypted by Tailscale), database `atlas_analytics`, user
+  `toonaweza`. Credentials live only in aeacus-dl's `.env`. Verified read-only (`readonly=1` in the session). Server version
+  24.10.2.80. It is a throwaway box: when `atlas-orchestrator.atlas.coreoutline.com` is back, repoint `CLICKHOUSE_HOST/PORT/USER/PASSWORD`
+  (and use TLS 8443 + a dedicated `GRANT SELECT` user) and retire these credentials. `list_tables` returns each table's full
+  `CREATE TABLE` text, so ask for small pages.
+- **Gotcha:** `clickhouse/clickhouse-server:latest` crashed with "Illegal instruction" on VM 100 (Proxmox `cpu: x86-64-v2-AES` hides
+  AVX/AVX2), but 24.10.2.80 runs there fine. Prefer a pinned older tag on that VM, or set `cpu: host` (VM restart) before using `latest`.
+
+## Dagster MCP (`dagster-mcp/`)
+
+Community [`dagster-mcp`](https://github.com/fabdendev/dagster-mcp) (MIT, single maintainer, `0.12.3` of 2026-09-28) as container
+`dagster-mcp`, registered in Open WebUI as `dagster`. **Installed without a Dagster target**: calls return
+"Cannot connect to Dagster at http://localhost:3000" until `.env` points it at a webserver.
+- **Why this one:** Dagster's official MCP is the Dagster+ hosted endpoint (cloud only). This wraps the GraphQL API of any
+  self-hosted webserver (`<DAGSTER_URL>/graphql`), which is what Maia provisions per warehouse.
+- **Vetted, not trusted:** the source was read in full (3.3k lines): its only network call is the GraphQL POST to `DAGSTER_URL`;
+  no telemetry. The image build downloads the exact wheel and **aborts unless its sha256 matches** the reviewed value
+  (`dagster-mcp/Dockerfile`); bump version and hash together after re-reading the diff. Transitive deps (fastmcp, httpx) are
+  not hash-pinned.
+- **Read-only:** `DAGSTER_READ_ONLY=true` is hard-coded, so the write tools (`launch_job`, `materialize_assets`,
+  `backfill_assets`, `terminate_run`, `reload_code_location`, start/stop schedule/sensor) are never registered.
+  17 read tools, about 5.2k tokens: runs (`get_runs`, `get_run_status`, `get_run_logs`, `get_run_stats`,
+  `get_run_failure_summary`), assets (`search_assets`, `get_asset_details`, `get_asset_health`,
+  `get_recent_materializations`, `resolve_asset_selection`), `list_jobs`, `list_schedules`, `list_sensors`, `get_tick_history`,
+  `list_code_locations`, `get_instance_status`, `list_backfills`.
+- **Only stdio upstream**, so `dagster-mcp/serve_http.py` (our code) serves it over streamable HTTP with a mandatory bearer token
+  (`DAGSTER_MCP_AUTH_TOKEN`, constant-time compare, 401) and a Host allow-list (421). Private Docker network `dgmcp` shared only
+  with open-webui; no published port; read-only rootfs, no capabilities, 512 MB.
+- **Default-on only for large-context models** (`qwen3.5:9b`, `qwen3.5:researcher`, the four Claude models): 5.2k tokens would
+  overflow the 16k models (gemma4, qwen2.5:14b, DeepSeek-R1). Change with `DAGSTER_MCP_MODELS=... register_in_openwebui.py`.
+- **Current target (2026-11-22): the emergency Dagster on data-handler**: `DAGSTER_URL=http://100.127.65.29:13000` (webserver 1.13.31,
+  no auth, Tailnet only; 5 code locations, 5 schedules RUNNING). Verified: `get_instance_status` healthy, `list_code_locations`,
+  `list_schedules`. Same throwaway caveat as ClickHouse above.
+- **To point it elsewhere:** in `.env` on aeacus-dl set `DAGSTER_URL` (e.g. `http://192.168.100.9:3000`), `DAGSTER_API_TOKEN` only if the
+  webserver needs one, then `docker compose up -d dagster-mcp`. For several Dagster instances (one per Maia warehouse) set
+  `DAGSTER_ENVS` (JSON name -> url/token); tools then take `env=<name>`.
 
 ## Community plugins (`plugins/`)
 

@@ -115,8 +115,11 @@ services:
       # Shared ONLY with google-workspace-mcp, so nothing else (notably mcp-tools' sandbox,
       # which has internet access) can reach the server that holds the Google refresh token.
       - gws
+      # Shared ONLY with clickhouse-mcp (same idea as gws): nothing else can reach it.
+      - chmcp
+      - dgmcp
 
-  # Google Workspace MCP (Drive/Docs/Sheets/Slides via the regular Google REST APIs).
+  # Google Workspace MCP (Drive/Docs/Sheets/Slides read-only + Calendar read/write, via the regular Google REST APIs).
   # Single-user: holds ONE Google account's refresh token (credentials volume). The /mcp
   # endpoint has no auth of its own, so isolation is by network: it is attached only to the
   # `gws` network (open-webui is the only other member) and publishes only 127.0.0.1:8001, which
@@ -129,8 +132,12 @@ services:
     # --tool-tier core: the "complete" read-only set was 23 tools / ~9.2k tokens of schema sent
     # with EVERY request (all tools are default-on for all models) -> overflows the 16k-context
     # local models. Core keeps search/list/read for each service.
-    command: ["--transport", "streamable-http", "--single-user", "--read-only",
-              "--tool-tier", "core", "--tools", "drive", "docs", "sheets", "slides"]
+    # 2026-11-22: Calendar is read/write (list_calendars, get_events, manage_event = create/update/delete),
+    # everything else stays read-only. --permissions replaces --read-only/--tools (mutually exclusive) and
+    # requests only the scopes each level needs: Drive/Docs/Sheets/Slides read-only, Calendar full.
+    command: ["--transport", "streamable-http", "--single-user",
+              "--tool-tier", "core",
+              "--permissions", "drive:readonly", "docs:readonly", "sheets:readonly", "slides:readonly", "calendar:full"]
     environment:
       - GOOGLE_OAUTH_CLIENT_ID=${GOOGLE_OAUTH_CLIENT_ID:?set GOOGLE_OAUTH_CLIENT_ID in .env}
       - GOOGLE_OAUTH_CLIENT_SECRET=${GOOGLE_OAUTH_CLIENT_SECRET:?set GOOGLE_OAUTH_CLIENT_SECRET in .env}
@@ -158,6 +165,92 @@ services:
     tmpfs: ["/tmp:size=256m", "/home/gws:size=64m,uid=10001,gid=10001"]
     mem_limit: 1g
     pids_limit: 256
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  # ClickHouse MCP (list_databases / list_tables / run_query) over ClickHouse's HTTP interface (8123/8443,
+  # NOT native 9000). Installed 2026-11-22 WITHOUT a ClickHouse target: set CLICKHOUSE_HOST/_USER/_PASSWORD
+  # (and _PORT/_SECURE/_VERIFY) in .env, then `docker compose up -d clickhouse-mcp`. Until then tool calls
+  # return "Missing required environment variables". Read-only: writes are not enabled here on purpose.
+  # Isolation: only the `chmcp` network (open-webui is the only other member), no published port, and a
+  # mandatory bearer token (Open WebUI sends it; see clickhouse-mcp/register_in_openwebui.py).
+  clickhouse-mcp:
+    build: ./clickhouse-mcp
+    image: homelab/clickhouse-mcp:0.7.0
+    container_name: clickhouse-mcp
+    restart: always
+    environment:
+      - CLICKHOUSE_MCP_AUTH_TOKEN=${CLICKHOUSE_MCP_AUTH_TOKEN:?set CLICKHOUSE_MCP_AUTH_TOKEN in .env (openssl rand -hex 32)}
+      # Host header Open WebUI uses to reach this container; anything else is rejected (421).
+      - CLICKHOUSE_MCP_ALLOWED_HOSTS=clickhouse-mcp:8000,clickhouse-mcp
+      - CLICKHOUSE_MCP_QUERY_TIMEOUT=${CLICKHOUSE_MCP_QUERY_TIMEOUT:-30}
+      - CLICKHOUSE_MCP_MAX_WORKERS=4
+      # --- the ClickHouse target (empty until you configure it) ---
+      - CLICKHOUSE_HOST=${CLICKHOUSE_HOST:-}
+      - CLICKHOUSE_PORT=${CLICKHOUSE_PORT:-8123}
+      - CLICKHOUSE_USER=${CLICKHOUSE_USER:-}
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-}
+      - CLICKHOUSE_DATABASE=${CLICKHOUSE_DATABASE:-}
+      - CLICKHOUSE_SECURE=${CLICKHOUSE_SECURE:-false}
+      - CLICKHOUSE_VERIFY=${CLICKHOUSE_VERIFY:-true}
+      # Read-only on purpose (server-side readonly=1). Do not enable without a dedicated, tightly granted user.
+      - CLICKHOUSE_ALLOW_WRITE_ACCESS=false
+      - CLICKHOUSE_ALLOW_DROP=false
+    networks:
+      - chmcp
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    read_only: true
+    tmpfs: ["/tmp:size=64m", "/home/chmcp:size=16m,uid=10002,gid=10002"]
+    mem_limit: 512m
+    pids_limit: 128
+    healthcheck:
+      # TCP only: /health returns 503 while no ClickHouse is configured/reachable, which must not mark the MCP itself down.
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 8000), 3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  # Dagster MCP (runs, assets, jobs, schedules, sensors, backfills, code locations) over Dagster's GraphQL API.
+  # Installed 2026-11-22 WITHOUT a Dagster target: set DAGSTER_URL (and DAGSTER_API_TOKEN if the webserver needs one)
+  # in .env, then `docker compose up -d dagster-mcp`. Until then tool calls fail with a connection error to
+  # localhost:3000. READ-ONLY: DAGSTER_READ_ONLY=true means the launch/terminate/backfill/schedule/sensor tools are
+  # never registered. Community package pinned + sha256-checked at build (dagster-mcp/Dockerfile).
+  # Isolation: only the `dgmcp` network (open-webui is the only other member), no published port, mandatory bearer token.
+  dagster-mcp:
+    build: ./dagster-mcp
+    image: homelab/dagster-mcp:0.12.3
+    container_name: dagster-mcp
+    restart: always
+    environment:
+      - DAGSTER_MCP_AUTH_TOKEN=${DAGSTER_MCP_AUTH_TOKEN:?set DAGSTER_MCP_AUTH_TOKEN in .env (openssl rand -hex 32)}
+      - DAGSTER_MCP_ALLOWED_HOSTS=dagster-mcp:8000,dagster-mcp
+      # --- the Dagster target (placeholder until you configure it) ---
+      - DAGSTER_URL=${DAGSTER_URL:-http://localhost:3000}
+      - DAGSTER_API_TOKEN=${DAGSTER_API_TOKEN:-}
+      # Several instances (e.g. one Dagster per Maia warehouse): JSON like {"wh1":{"url":"http://...:3000"},"wh2":{...}}
+      - DAGSTER_ENVS=${DAGSTER_ENVS:-}
+      - DAGSTER_DEFAULT_ENV=${DAGSTER_DEFAULT_ENV:-}
+      - DAGSTER_READ_ONLY=true
+    networks:
+      - dgmcp
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    read_only: true
+    tmpfs: ["/tmp:size=64m", "/home/dgmcp:size=16m,uid=10003,gid=10003"]
+    mem_limit: 512m
+    pids_limit: 128
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 8000), 3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     logging:
       driver: json-file
       options: { max-size: "10m", max-file: "3" }
@@ -205,3 +298,5 @@ volumes:
 networks:
   default: {}
   gws: {}
+  chmcp: {}
+  dgmcp: {}
