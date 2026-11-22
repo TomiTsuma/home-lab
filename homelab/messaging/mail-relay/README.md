@@ -42,7 +42,7 @@ EOF
 ## One-time Brevo setup (owner)
 1. Sign up at brevo.com (free plan).
 2. **Senders, Domains & Dedicated IPs → Domains → Add `ereuna.org` → Authenticate**. Brevo shows TXT records
-   to add in Cloudflare DNS: `brevo-code:…` at the root, DKIM at `mail._domainkey` (per the API docs; use whatever the dashboard shows),
+   to add in Cloudflare DNS: `brevo-code:…` at the root, DKIM as CNAMEs `brevo1._domainkey` / `brevo2._domainkey` → `*.dkim.brevo.com`,
    and DMARC at `_dmarc` if none exists. Don't change the existing apex SPF/MX records used by Cloudflare Email Routing,
    except to add `include:spf.brevo.com` to the SPF record if Brevo asks for it.
 3. **SMTP & API → SMTP tab**: copy the **Login** and generate an **SMTP key** (not an API key).

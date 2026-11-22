@@ -20,3 +20,11 @@
 - Brevo signup, authenticate `ereuna.org` (add Brevo's TXT records in Cloudflare DNS), create an SMTP key, fill `.env`, run `./deploy.sh`.
 - Not verified, because the Brevo help center returned 403: the free-plan daily cap (believed to be 300/day) and whether new accounts need activation before
   SMTP works.
+
+## Go-live (same day, 11:08 EAT)
+- Owner supplied the Brevo SMTP login and key. They are in `messaging/mail-relay/.env` on the laptop (gitignored, chmod 600), deployed with `./deploy.sh`.
+- The queued test `E65E6EACE7` was delivered: `status=sent (250 2.0.0 OK: queued as <…@smtp-relay.sendinblue.com>)`, `tls=encrypt`. The queue is empty.
+- DNS was already authenticated by the owner: root TXT `brevo-code:…`, DKIM `brevo1._domainkey` CNAME → `b1.ereuna-org.dkim.brevo.com`, and
+  `_dmarc` = `v=DMARC1; p=none; rua=mailto:rua@dmarc.brevo.com`. The apex SPF only includes Cloudflare. That is fine, because DMARC passes on the
+  aligned Brevo DKIM signature, and the envelope sender is Brevo's own domain.
+- Brevo daily cap and account activation status were still not checked from the dashboard.
