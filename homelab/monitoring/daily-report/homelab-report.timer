@@ -1,0 +1,12 @@
+[Unit]
+Description=Send the homelab status report every morning
+
+[Timer]
+# pve's timezone is Africa/Nairobi, so this is 07:00 EAT.
+OnCalendar=*-*-* 07:00:00
+# If pve was off at 07:00, send the report once it is back up.
+Persistent=true
+RandomizedDelaySec=2min
+
+[Install]
+WantedBy=timers.target
