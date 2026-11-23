@@ -2,13 +2,16 @@
 """Aether (ereuna) service health alerts — runs on the Proxmox host (pve) from a systemd timer.
 
 Every 5 minutes: ship probes/host_probe.py (+ probes/container_probe.py) to aeacus-data-handler over SSH,
-collect ~60 checks across 8 layers (see host_probe.py), add pve-side checks (host RAM, how much of the
-aeacus VM is swapped out), then decide whether to email:
+collect ~60 checks across 8 layers (see host_probe.py), add pve-side context (host RAM, VM swap), then
+decide whether to email. Policy (owner, 2026-11-23): email ONLY when a service is down or unreachable, and
+at most once a day.
 
-  ALERT      a critical check has failed on CONFIRM_RUNS consecutive runs and wasn't alerted yet
-  REMINDER   still failing, REMIND_HOURS since the last email
-  RECOVERED  everything that was alerted on is passing again
-  --report   full report regardless of state (daily timer, 07:15)
+  critical   = something is unreachable: a container not running/unhealthy, a service not answering,
+               nginx 502/503/504, a service unable to reach a dependency, a datastore down, the public site down,
+               or aeacus itself unreachable. Everything else (load, RAM, worker restarts, HTTP 500 bugs,
+               slowness) is at most a warning: shown in the email for context, never a trigger.
+  ALERT      a critical check failed on CONFIRM_RUNS consecutive runs (10 min) and no email in EMAIL_EVERY_HOURS
+  --report   send the full report now regardless (manual; no timer)
 
 Email goes through the TrueNAS mail-relay (no auth on the LAN). Standard library only.
 
@@ -39,9 +42,9 @@ STATE_FILE = Path(os.environ.get("AETHER_STATE", "/var/lib/aether-health/state.j
 ACK_FILE = Path(os.environ.get("AETHER_ACK", "/etc/aether-health/acknowledged.txt"))
 
 CONFIRM_RUNS = 2          # a check must fail this many runs in a row (= 10 min) before it alerts
-REMIND_HOURS = 6
-VM_SWAP_WARN_MB, VM_SWAP_CRIT_MB = 256, 1024
-HOST_AVAIL_WARN_MB, HOST_AVAIL_CRIT_MB = 2048, 512
+EMAIL_EVERY_HOURS = 24    # at most one email per day
+VM_SWAP_WARN_MB = 256
+HOST_AVAIL_WARN_MB = 2048
 
 OK, WARN, CRIT = "ok", "warn", "crit"
 RANK = {OK: 0, WARN: 1, CRIT: 2}
@@ -78,12 +81,12 @@ def collect_pve() -> list[dict]:
     try:
         mem = {l.split(":")[0]: int(l.split()[1]) for l in open("/proc/meminfo")}
         avail = mem["MemAvailable"] // 1024
-        st = CRIT if avail < HOST_AVAIL_CRIT_MB else WARN if avail < HOST_AVAIL_WARN_MB else OK
+        st = WARN if avail < HOST_AVAIL_WARN_MB else OK      # context only, never a trigger
         out.append(check(g, "pve RAM available", st, f"{avail} MB of {mem['MemTotal'] // 1024} MB"))
         pid = Path(f"/run/qemu-server/{AEACUS_VMID}.pid").read_text().strip()
         status = {l.split(":")[0]: l.split()[1] for l in open(f"/proc/{pid}/status") if ":" in l and len(l.split()) > 1}
         swap = int(status.get("VmSwap", "0")) // 1024
-        st = CRIT if swap > VM_SWAP_CRIT_MB else WARN if swap > VM_SWAP_WARN_MB else OK
+        st = WARN if swap > VM_SWAP_WARN_MB else OK
         out.append(check(g, "aeacus VM memory swapped out by pve", st,
                          f"{swap} MB of the VM's RAM is on pve swap" + (" — guest stalls on every touch" if st != OK else "")))
     except Exception as e:  # noqa: BLE001
@@ -126,22 +129,12 @@ def evaluate(checks: list[dict], state: dict, now: float, report: bool = False) 
     last = state.get("last_email", 0)
 
     kind = None
-    if confirmed - alerted:
-        kind = "alert"                       # something new is confirmed broken
-    elif alerted and not current_crit:
-        kind = "recovered"                   # everything we paged about passes again
-    elif confirmed and now - last >= REMIND_HOURS * 3600:
-        kind = "reminder"
-    if report and kind is None:
+    if confirmed and now - last >= EMAIL_EVERY_HOURS * 3600:
+        kind = "alert"                       # something is confirmed unreachable and we haven't emailed today
+    elif report:
         kind = "report"
-
-    if kind in ("alert", "reminder"):
-        alerted = confirmed
-    elif kind == "recovered":
-        alerted = set()
-    else:
-        alerted &= current_crit              # forget alerted checks that cleared while others still fail
-    return kind, {"fails": fails, "alerted": sorted(alerted), "last_email": now if kind else last}
+    alerted = confirmed if kind == "alert" else alerted & current_crit
+    return kind, {"fails": fails, "alerted": sorted(alerted), "last_email": now if kind == "alert" else last}
 
 
 # ----------------------------------------------------------------------------- rendering

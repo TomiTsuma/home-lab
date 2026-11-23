@@ -1,8 +1,8 @@
 # Aether health alerts
 
 Every **5 minutes** the Proxmox host checks the whole Aether (ereuna) stack on aeacus-data-handler, end to end.
-It emails `tomitsuma@ereuna.org` through the TrueNAS [mail-relay](../../messaging/mail-relay/README.md) when
-something breaks and again when it recovers. A full report goes out every morning at **07:15 EAT**.
+It emails you through the TrueNAS [mail-relay](../../messaging/mail-relay/README.md) only when something is down
+or unreachable, and at most once a day.
 
 This is separate from the [daily homelab report](../daily-report/README.md). That one covers machines; this one
 covers whether Aether's services work and can reach one another.
@@ -27,12 +27,28 @@ Which dependencies each service is tested against comes from each service's `con
 auth → postgres, redis, kafka · repository → postgres, kafka, opensearch, minio, auth-jwks ·
 datasets → postgres, kafka, clickhouse, opensearch, minio · platform → postgres, auth-jwks · inference → none (stub).
 
-## Alerting rules
-- **ALERT:** a *critical* check fails on **2 consecutive runs** (10 min). A single blip never emails.
-- **REMINDER:** every 6 h while it stays broken. **RECOVERED:** once everything that was alerted on passes again.
-- Warnings (slow responses, recent restarts, pressure) never page. They appear in alerts and the daily report.
+## Alerting rules (changed 2026-11-23 at the owner's request)
+**You get an email only when part of Aether is down or unreachable, and at most one email per day.**
+- **Triggers (critical):**
+  - a container is not running, or its Docker healthcheck is failing;
+  - a service doesn't answer at all;
+  - nginx returns 502/503/504;
+  - a service can't reach one of its dependencies;
+  - a datastore is down;
+  - app.ereuna.org is unreachable (5xx gateway or Cloudflare 52x);
+  - aeacus itself is unreachable.
+
+  A trigger must fail on **2 consecutive runs** (10 min). A single blip never emails.
+- **Never triggers (warning, shown only as context inside an alert):**
+  - host load, RAM or IO pressure; pve RAM/swap;
+  - uvicorn worker restarts;
+  - an endpoint answering with an app error such as HTTP 500;
+  - slow responses; recent restarts.
+- **Once a day:** after an alert, no further email for 24 h, even for a new outage. If something is still down 24 h later,
+  you get one more alert. There are no reminder, recovery or scheduled daily-report emails.
+- **Full report on demand:** `ssh root@100.124.198.112 systemctl start aether-health-report`.
 - **Acknowledging a known issue:** put its `Group|Check name` (as shown in the email) on a line in
-  `/etc/aether-health/acknowledged.txt` on pve. It is then shown as a warning and stops paging. Remove the line once it's fixed.
+  `/etc/aether-health/acknowledged.txt` on pve. It is then shown as a warning and can't trigger. Remove the line once it's fixed.
 
 ## Design notes and tradeoffs
 - **Why not just Docker healthchecks?** During the 2026-11-22 outage every container stayed *healthy*
@@ -62,12 +78,14 @@ python3.11 -m unittest test_aether_health.py                                    
 State: `/var/lib/aether-health/state.json`. To reset alerting, delete it.
 
 ## Known issues found on the first runs (2026-11-22/23)
-- **Outage 01:30–02:20 EAT:** pve ran out of RAM (VMs get 44.9 GB, host has 40 GB) and swapped ~2.7 GB of
-  aeacus-data-handler's memory. The VM stalled, and uvicorn's 5 s worker heartbeat failed in auth, repository and platform
-  (`--workers 2`). Workers were killed and respawned every ~5 s, so load hit 285 on 2 vCPUs. Containers were restarted.
-  Restarting gave services new IPs, and nginx kept the old ones until `nginx -s reload`. The underlying RAM shortage is not fixed.
-- **datasets list returns 500:** the image expects column `dataset.datasets.dataset_type`, but the production DB lacks it (missing migration).
-- **repository/datasets → OpenSearch broken:** OpenSearch serves HTTPS only, but the services use `OPENSEARCH_USE_SSL=false` or have it unset.
-  Repository search still returns 200, which suggests it swallows the error.
-- **datasets → MinIO broken:** `MINIO_ENDPOINT=minio:9000` (compose default); there is no `minio` host. Repository uses `s3.ereuna.org`.
-- Neo4j HTTP :7474 doesn't answer (bolt works). No service uses Neo4j yet, so this is a warning only.
+- **Outages 01:30–02:20 and ~08:40–09:15 EAT:** pve ran out of RAM (VMs get 44.9 GB, host has 40 GB) and swapped
+  aeacus-data-handler's memory. uvicorn `--workers 2` turned the stalls into a worker respawn loop.
+  **Fixed in Aether:** auth, repository and platform now run one worker each (compose `command:`). The pve RAM shortage is **not fixed**.
+- ~~datasets list 500 (missing `dataset_type`, `visibility`, `owner_id` columns)~~. **Fixed 2026-11-23:** migration applied
+  (Aether repo `DatasetsService/db/migrations/20261123_datasets_add_type_visibility_owner.sql`).
+- ~~repository → OpenSearch over HTTP~~. **Fixed:** `OPENSEARCH_USE_SSL=true`. OpenSearch's admin password was also the 2.11 demo
+  default `admin` and is now the one in `.env.production`.
+- ~~datasets → `minio:9000`~~. **Fixed:** the container had been created without `--env-file`. It now uses `s3.ereuna.org`, and the
+  compose file no longer re-declares MinIO defaults.
+- The datasets → OpenSearch failure was a false positive in the probe (datasets hard-codes TLS). Fixed in `container_probe.py`.
+- Restarting Aether services changes their IPs. Run `docker exec ereuna_web nginx -s reload` afterwards, until nginx.conf uses a resolver.

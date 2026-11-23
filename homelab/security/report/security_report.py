@@ -769,13 +769,24 @@ def summarize_trivy(image: str, report: dict) -> dict:
 
 def run_scan():
     token = TOKEN_FILE.read_text().strip()
-    trivy = (f"docker run --rm -e TRIVY_TOKEN={token} -v /var/run/docker.sock:/var/run/docker.sock:ro {TRIVY_IMAGE} "
+    # --cpus/--memory: never let a scan starve the host (the first full scan pushed aeacus-data-handler to load 110).
+    # Named cache volume: each image layer is unpacked once; later nights only re-match package lists (cheap).
+    trivy = (f"docker run --rm --cpus 0.5 --memory 1g -e TRIVY_TOKEN={token} -v homelab-trivy-cache:/root/.cache "
+             f"-v /var/run/docker.sock:/var/run/docker.sock:ro {TRIVY_IMAGE} "
              f"image --server {TRIVY_SERVER} --scanners vuln --severity HIGH,CRITICAL --format json --quiet --timeout 15m ")
     result = {"started": time.time(), "hosts": {}}
     for host, target in SCAN_HOSTS.items():
         images, errors = [], []
         try:
             if target:
+                rc, la, _ = sh(["ssh", "-o", "BatchMode=yes", target, "cat /proc/loadavg; nproc"], 60)
+                load1, ncpu = float(la.split()[0]), int(la.split()[-1])
+                if load1 > ncpu:
+                    result["hosts"][host] = {"error": f"skipped: host busy (load {load1:.0f} on {ncpu} CPUs); previous results kept"}
+                    prev = load_json(STATE / "vulns.json", {}).get("hosts", {}).get(host)
+                    if prev and "error" not in prev:
+                        result["hosts"][host] = {**prev, "stale": True}
+                    continue
                 rc, out, err = sh(["ssh", "-o", "BatchMode=yes", target, "docker ps --format '{{.Image}}' | sort -u"], 60)
             else:
                 d = guest_exec("import subprocess;print(__import__('json').dumps(sorted(set(subprocess.run(['docker','ps','--format','{{.Image}}'],capture_output=True,text=True).stdout.split()))))", 60)

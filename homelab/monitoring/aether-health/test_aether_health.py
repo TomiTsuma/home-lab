@@ -25,10 +25,12 @@ def c(name, status, group="Gateway"):
 
 
 class StateMachine(unittest.TestCase):
-    def run_seq(self, runs, report=False):
-        state, kinds = {}, []
+    """Policy: email only for confirmed unreachable (critical) checks, at most once per 24 h."""
+
+    def run_seq(self, runs, report=False, step=300, state=None):
+        state, kinds = state or {}, []
         for i, checks in enumerate(runs):
-            kind, state = ah.evaluate(checks, state, now=1000 + i * 300, report=report)
+            kind, state = ah.evaluate(checks, state, now=10_000_000 + i * step, report=report)
             kinds.append(kind)
         return kinds, state
 
@@ -36,36 +38,29 @@ class StateMachine(unittest.TestCase):
         kinds, _ = self.run_seq([[c("a", "crit")], [c("a", "ok")], [c("a", "ok")]])
         self.assertEqual(kinds, [None, None, None])
 
-    def test_alert_after_two_consecutive_failures_then_recovered(self):
-        kinds, state = self.run_seq([[c("a", "crit")], [c("a", "crit")], [c("a", "crit")], [c("a", "ok")]])
-        self.assertEqual(kinds, [None, "alert", None, "recovered"])
-        self.assertEqual(state["alerted"], [])
+    def test_alert_after_two_consecutive_failures_no_recovery_mail(self):
+        kinds, _ = self.run_seq([[c("a", "crit")], [c("a", "crit")], [c("a", "crit")], [c("a", "ok")]])
+        self.assertEqual(kinds, [None, "alert", None, None])
 
-    def test_new_failure_while_alerting_sends_another_alert(self):
-        kinds, state = self.run_seq([[c("a", "crit")], [c("a", "crit")],
-                                     [c("a", "crit"), c("b", "crit")], [c("a", "crit"), c("b", "crit")]])
-        self.assertEqual(kinds, [None, "alert", None, "alert"])
-        self.assertEqual(state["alerted"], ["Gateway|a", "Gateway|b"])
+    def test_at_most_one_email_per_day_even_for_a_new_outage(self):
+        kinds, _ = self.run_seq([[c("a", "crit")]] * 2 + [[c("a", "crit"), c("b", "crit")]] * 3)
+        self.assertEqual(kinds.count("alert"), 1)
 
-    def test_reminder_after_remind_hours(self):
-        state = {"fails": {"Gateway|a": 5}, "alerted": ["Gateway|a"], "last_email": 0}
-        kind, _ = ah.evaluate([c("a", "crit")], state, now=ah.REMIND_HOURS * 3600 + 1)
-        self.assertEqual(kind, "reminder")
-        kind, _ = ah.evaluate([c("a", "crit")], state, now=60)
+    def test_next_day_still_failing_emails_again(self):
+        state = {"fails": {"Gateway|a": 50}, "alerted": ["Gateway|a"], "last_email": 0}
+        kind, _ = ah.evaluate([c("a", "crit")], state, now=ah.EMAIL_EVERY_HOURS * 3600 + 1)
+        self.assertEqual(kind, "alert")
+        kind, _ = ah.evaluate([c("a", "crit")], {**state, "last_email": 1000}, now=2000)
         self.assertIsNone(kind)
 
-    def test_warnings_never_alert(self):
-        kinds, _ = self.run_seq([[c("a", "warn")]] * 4)
-        self.assertEqual(kinds, [None] * 4)
+    def test_warnings_never_email(self):
+        kinds, _ = self.run_seq([[c("a", "warn")]] * 6)
+        self.assertEqual(kinds, [None] * 6)
 
-    def test_report_flag_always_sends(self):
-        kinds, _ = self.run_seq([[c("a", "ok")]], report=True)
-        self.assertEqual(kinds, ["report"])
-
-    def test_no_recovery_mail_while_another_alerted_check_still_fails(self):
-        kinds, state = self.run_seq([[c("a", "crit"), c("b", "crit")]] * 2 + [[c("a", "ok"), c("b", "crit")]])
-        self.assertEqual(kinds, [None, "alert", None])
-        self.assertEqual(state["alerted"], ["Gateway|b"])
+    def test_report_flag_sends_without_using_the_daily_alert_slot(self):
+        kind, state = ah.evaluate([c("a", "ok")], {}, now=5, report=True)
+        self.assertEqual(kind, "report")
+        self.assertEqual(state["last_email"], 0)
 
 
 class Acks(unittest.TestCase):

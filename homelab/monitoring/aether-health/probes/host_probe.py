@@ -96,19 +96,19 @@ def latency_status(ms):
 def host_checks():
     ncpu = os.cpu_count() or 1
     load1, load5, _ = os.getloadavg()
-    st = "crit" if load5 > ncpu * 8 else "warn" if load5 > ncpu * 2 else "ok"
+    st = "warn" if load5 > ncpu * 2 else "ok"
     add("Host", "Load (5 min)", st, f"{load5:.1f} on {ncpu} vCPU (1 min {load1:.1f})")
     for res in ("cpu", "io", "memory"):
         try:
             line = open(f"/proc/pressure/{res}").readline()   # "some avg10=.. avg60=.. avg300=.. total=.."
             avg60 = float(line.split()[2].split("=")[1])
-            st = "crit" if avg60 > 60 else "warn" if avg60 > 25 else "ok"
+            st = "warn" if avg60 > 25 else "ok"
             add("Host", f"{res.upper()} pressure", st, f"{avg60:.0f}% of the last minute stalled waiting for {res}")
         except OSError:
             pass
     mem = {l.split(":")[0]: int(l.split()[1]) for l in open("/proc/meminfo")}
     avail = mem["MemAvailable"] / mem["MemTotal"] * 100
-    add("Host", "Memory available", "crit" if avail < 5 else "warn" if avail < 10 else "ok",
+    add("Host", "Memory available", "warn" if avail < 10 else "ok",
         f"{mem['MemAvailable'] // 1024} MB of {mem['MemTotal'] // 1024} MB ({avail:.0f}%)")
 
 
@@ -145,7 +145,7 @@ def container_checks():
         if restarts:
             detail += f", {restarts} auto-restart(s)"
         if s.get("OOMKilled"):
-            st, detail = "crit", detail + ", last exit was an OOM kill"
+            st, detail = (st if st == "crit" else "warn"), detail + ", last exit was an OOM kill"
         add("Containers", n, st, detail)
 
     since = f"{WINDOW_MIN}m"
@@ -157,7 +157,7 @@ def container_checks():
         died = sum(1 for l in logs.splitlines() if "Child process" in l and "died" in l)
         tracebacks = logs.count("Traceback (most recent call last)")
         errors5xx = sum(1 for l in logs.splitlines() if '" 50' in l or "→ 50" in l)
-        st = "crit" if died >= 3 else "warn" if died else "ok"
+        st = "warn" if died else "ok"
         add("Worker stability", f"{n}: worker restarts", st,
             f"{died} uvicorn worker deaths in {WINDOW_MIN} min" + (" — respawn loop (CPU/memory starvation?)" if died >= 3 else ""))
         if tracebacks or errors5xx:
@@ -182,7 +182,8 @@ def api_checks():
         svc = n.replace("ereuna_", "").replace("_service", "")
         try:
             code, body, ms = http(f"http://127.0.0.1:{port}{path}")
-            st = "crit" if code != 200 else latency_status(ms)
+            # Any HTTP answer means the service is reachable; only no answer at all is critical.
+            st = "warn" if code != 200 else latency_status(ms)
             add("Service API (direct)", f"{svc} {path}", st, f"HTTP {code} in {ms} ms", ms)
         except Exception as e:  # noqa: BLE001
             add("Service API (direct)", f"{svc} {path}", "crit", f"{type(e).__name__}: {e}")
@@ -200,7 +201,9 @@ def api_checks():
             else:
                 hint = (" (nginx can't reach the service)" if code in (502, 503, 504)
                         else " (the service crashed handling it — see its traceback in docker logs)" if code == 500 else "")
-                add("Gateway (nginx → service → datastore)", name, "crit",
+                # 502/503/504 = nginx can't reach the service (critical). Anything else (e.g. 500) = the service
+                # answered but has a bug: shown as a warning, never emailed on its own.
+                add("Gateway (nginx → service → datastore)", name, "crit" if code in (502, 503, 504) else "warn",
                     f"HTTP {code}{hint}, expected {sorted(ok_codes)} JSON — {proves}: {body[:100]!r}", ms)
         except Exception as e:  # noqa: BLE001
             add("Gateway (nginx → service → datastore)", name, "crit", f"{type(e).__name__}: {e}")
@@ -216,7 +219,8 @@ def dependency_checks():
             rc, out, err = sh(["docker", "exec", "-i", n, "python", "-", *deps], timeout=75, stdin=CONTAINER_PROBE_SRC)  # noqa: F821
             results = json.loads(out.strip().splitlines()[-1])
         except Exception as e:  # noqa: BLE001
-            add("Service → dependency", f"{svc} → *", "crit", f"probe could not run in container: {type(e).__name__}: {str(e)[:150]}")
+            # Couldn't test (usually docker exec timing out under load); a stopped container is caught above.
+            add("Service → dependency", f"{svc} → *", "warn", f"probe could not run in container: {type(e).__name__}: {str(e)[:150]}")
             continue
         for r in results:
             st = "ok" if r["ok"] else "crit"
@@ -291,7 +295,8 @@ def public_checks():
     for name, path, ok_codes in PUBLIC_ROUTES:
         try:
             code, body, ms = http(PUBLIC_BASE + path, timeout=15)
-            st = "ok" if code in ok_codes else "crit"
+            # Critical only when the site is unreachable: gateway errors or Cloudflare's 52x "origin down".
+            st = "ok" if code in ok_codes else "crit" if code in (502, 503, 504) or 520 <= code <= 530 else "warn"
             if st == "ok" and ms > 4000:
                 st = "warn"
             add("Public (Cloudflare → app.ereuna.org)", name, st, f"HTTP {code} in {ms} ms", ms)

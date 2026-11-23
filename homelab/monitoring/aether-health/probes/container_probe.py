@@ -139,7 +139,9 @@ def check_clickhouse():
 def check_opensearch():
     host, port = E("OPENSEARCH_HOST", "opensearch"), E("OPENSEARCH_PORT", "9200")
     resolve(host)
-    scheme = "https" if E("OPENSEARCH_USE_SSL", "false").lower() in ("1", "true", "yes") else "http"
+    # Unset means the code's own default, which is TLS for both services (repository settings default
+    # True; datasets hard-codes use_ssl=True). Only an explicit false means plain HTTP.
+    scheme = "http" if E("OPENSEARCH_USE_SSL", "true").lower() in ("0", "false", "no") else "https"
     user, pw = E("OPENSEARCH_USER"), E("OPENSEARCH_PASSWORD") or E("OPENSEARCH_INITIAL_ADMIN_PASSWORD")
     try:
         code, body = http(f"{scheme}://{host}:{port}/_cluster/health", user, pw, insecure=True)
