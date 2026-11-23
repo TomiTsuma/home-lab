@@ -1,0 +1,9 @@
+[Unit]
+Description=Hourly check for high-risk IDS alerts
+
+[Timer]
+OnCalendar=*-*-* *:07:00
+Persistent=false
+
+[Install]
+WantedBy=timers.target

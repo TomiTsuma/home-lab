@@ -1,0 +1,9 @@
+[Unit]
+Description=Evening homelab security report at 19:00 EAT
+
+[Timer]
+OnCalendar=*-*-* 19:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,25 @@
+# Trivy vulnerability-DB server (TrueNAS custom app "trivy-server").
+#
+# Why a server: the internet link here is slow (~10 KB/s at times). Trivy's DB is ~70 MB. One server
+# downloads it once a day. The scanners on each host run in client mode (`--server http://192.168.100.10:4954`):
+# they inventory packages locally and send only that list here for matching, so no host downloads the DB.
+#
+# LAN-only: the port is published on TrueNAS's LAN address, there's no Cloudflare route, and a token is required.
+services:
+  trivy:
+    image: aquasec/trivy:0.58.1
+    container_name: trivy-server
+    command: ["server", "--listen", "0.0.0.0:4954", "--cache-dir", "/cache", "--token", "${TRIVY_TOKEN}"]
+    environment:
+      TRIVY_SKIP_JAVA_DB_UPDATE: "true"   # Java DB is ~600 MB; too big for this link. JARs are matched by OS/lang DB only.
+    ports:
+      - "192.168.100.10:4954:4954"
+    volumes:
+      - trivy-cache:/cache
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+volumes:
+  trivy-cache:

@@ -1,0 +1,114 @@
+%YAML 1.1
+---
+# Homelab overrides for Suricata on pve. Included at the end of the stock /etc/suricata/suricata.yaml
+# (`include: homelab.yaml`), so every key here replaces the stock value.
+#
+# Why pve: it's the only box that sees every VM's traffic. vmbr0 carries all VM <-> LAN <-> internet
+# frames, and tailscale0 carries remote access. Detection only (IDS); nothing is blocked.
+# pve is short on RAM, so this config is tuned small, and systemd caps the process (see suricata.override.conf).
+
+# An include replaces the whole `vars` map, so every variable the ET rules reference must be repeated here.
+vars:
+  address-groups:
+    HOME_NET: "[192.168.100.0/24,100.64.0.0/10,10.77.0.0/24,10.78.0.0/24,172.16.0.0/12,fd7a:115c:a1e0::/48]"
+    EXTERNAL_NET: "!$HOME_NET"
+    HTTP_SERVERS: "$HOME_NET"
+    SMTP_SERVERS: "$HOME_NET"
+    SQL_SERVERS: "$HOME_NET"
+    DNS_SERVERS: "$HOME_NET"
+    TELNET_SERVERS: "$HOME_NET"
+    AIM_SERVERS: "$EXTERNAL_NET"
+    DC_SERVERS: "$HOME_NET"
+    DNP3_SERVER: "$HOME_NET"
+    DNP3_CLIENT: "$HOME_NET"
+    MODBUS_CLIENT: "$HOME_NET"
+    MODBUS_SERVER: "$HOME_NET"
+    ENIP_CLIENT: "$HOME_NET"
+    ENIP_SERVER: "$HOME_NET"
+  port-groups:
+    HTTP_PORTS: "80"
+    SHELLCODE_PORTS: "!80"
+    ORACLE_PORTS: 1521
+    SSH_PORTS: 22
+    DNP3_PORTS: 20000
+    MODBUS_PORTS: 502
+    FILE_DATA_PORTS: "[$HTTP_PORTS,110,143]"
+    FTP_PORTS: 21
+    GENEVE_PORTS: 6081
+    VXLAN_PORTS: 4789
+    TEREDO_PORTS: 3544
+
+af-packet:
+  - interface: vmbr0
+    cluster-id: 99
+    cluster-type: cluster_flow
+    threads: 2
+    defrag: yes
+    use-mmap: yes
+    ring-size: 4096
+  - interface: tailscale0       # layer-3 tun device; Suricata handles it as raw IP
+    cluster-id: 98
+    cluster-type: cluster_flow
+    threads: 1
+    use-mmap: yes
+  - interface: default
+
+# --- memory: small caps instead of the multi-hundred-MB defaults -------------------------------
+detect:
+  profile: low
+  sgh-mpm-context: single
+  inspection-recursion-limit: 3000
+flow:
+  memcap: 64mb
+  hash-size: 65536
+  prealloc: 5000
+stream:
+  memcap: 64mb
+  checksum-validation: no        # offloaded checksums on a bridge are often "wrong"; avoid false invalids
+  reassembly:
+    memcap: 128mb
+    depth: 1mb
+defrag:
+  memcap: 16mb
+host:
+  memcap: 16mb
+
+# --- outputs: one EVE file the daily report reads ----------------------------------------------
+outputs:
+  - fast:
+      enabled: no
+  - stats:
+      enabled: no
+  - eve-log:
+      enabled: yes
+      filetype: regular
+      filename: eve.json
+      types:
+        - alert:
+            payload: no
+            packet: no
+            metadata: yes
+        - anomaly:
+            enabled: yes
+            types:
+              decode: no         # bridge/offload noise
+              stream: no
+              applayer: yes
+        - flow                   # one line per finished flow: feeds the "unusual traffic" analysis
+        - stats:
+            totals: yes
+            threads: no
+            deltas: no
+  - eve-log:
+      enabled: no
+
+logging:
+  outputs:
+    - console:
+        enabled: no
+    - file:
+        enabled: yes
+        level: notice
+        filename: /var/log/suricata/suricata.log
+    - syslog:
+        enabled: no

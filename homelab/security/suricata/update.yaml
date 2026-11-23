@@ -1,0 +1,4 @@
+# /etc/suricata/update.yaml — suricata-update config (ET Open is the default free source).
+disable-conf: /etc/suricata/disable.conf
+reload-command: suricatasc -c reload-rules /run/suricata-command.socket || systemctl restart suricata
+sources: []

@@ -1,0 +1,10 @@
+[Unit]
+Description=Update Suricata rules (Emerging Threats Open)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/suricata-update-homelab --no-test
+ExecStartPost=/bin/systemctl reload-or-restart suricata
+Nice=10

@@ -1,0 +1,24 @@
+#!/usr/bin/python3
+"""suricata-update with a fix for Debian's 1.3.4 package on Python 3.13.
+
+rule.parse_fileobj() does `line.decode()` inside a bare `except: pass`. If an Emerging Threats rule file
+contains a non-UTF-8 byte, the line stays `bytes` and `line.endswith("\\")` raises TypeError, so the whole
+update fails. Decode every line with errors="replace" first, then hand plain str lines to the original parser.
+Remove this wrapper once Debian ships a fixed suricata-update.
+"""
+import io
+import sys
+
+import suricata.update.rule as rule_mod
+from suricata.update import main
+
+_orig = rule_mod.parse_fileobj
+
+
+def parse_fileobj(fileobj, group=None):
+    lines = [l.decode("utf-8", errors="replace") if isinstance(l, bytes) else l for l in fileobj]
+    return _orig(io.StringIO("".join(lines)), group)
+
+
+rule_mod.parse_fileobj = parse_fileobj
+sys.exit(main.main())

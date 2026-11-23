@@ -1,0 +1,13 @@
+[Unit]
+Description=Homelab urgent IDS alert check
+After=network-online.target suricata.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# report.env holds REPORT_TO=<address>; created by you on pve, not in the repo.
+EnvironmentFile=-/etc/homelab-security/report.env
+ExecStart=/usr/bin/flock /run/homelab-security.lock /usr/bin/python3 /opt/homelab-security/security_report.py --urgent
+TimeoutStartSec=10min
+Nice=10
+IOSchedulingClass=idle
