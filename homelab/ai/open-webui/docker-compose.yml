@@ -35,6 +35,12 @@ services:
       # measured), so switching to a not-yet-loaded model failed with "timed out waiting for
       # llama-server to start" (seen with gemma4, 2026-11-21).
       - OLLAMA_LOAD_TIMEOUT=15m
+      # Flash attention + 8-bit KV cache roughly halve the VRAM a long context costs, so a 12-14B
+      # model (Q4) can stay fully on the 3060's 12 GB at 16-24k context instead of spilling to
+      # system RAM (a 14B spilled and swapped the whole host on 2026-11-23). Quality loss from
+      # q8_0 KV is negligible in practice. (2026-11-23, see docs/changelog agent_model_benchmark)
+      - OLLAMA_FLASH_ATTENTION=1
+      - OLLAMA_KV_CACHE_TYPE=q8_0
     logging:
       driver: json-file
       options: { max-size: "20m", max-file: "3" }
@@ -106,7 +112,12 @@ services:
       # stateless protocol); mcp-tools (SDK 1.30) rejects it and the client falls back to the
       # legacy initialize handshake. Under heavy disk I/O (e.g. a cold model load) probe +
       # fallback exceeded 10s -> "Failed to connect to MCP server 'homelab'" (2026-11-21).
-      - MCP_INITIALIZE_TIMEOUT=30
+      # 2026-11-24: lowered 30 -> 8. At 30 s one dead MCP server stalled every tool-using chat
+      # request (Claude models too) for up to 30 s. mcp-healthcheck now switches dead servers
+      # off, and this bounds the cost in the ~1.5 min before it does. Not lower than 8: the
+      # 2026-11-21 failure above needed >10 s only under heavy disk I/O, so 8 trades a rare
+      # false "Failed to connect" during a cold model load for a 4x shorter stall.
+      - MCP_INITIALIZE_TIMEOUT=8
       - 'TOOL_SERVER_CONNECTIONS=[{"type":"mcp","url":"http://mcp-tools:8000/mcp","path":"","auth_type":"session","key":"","config":{"enable":true},"info":{"id":"homelab","name":"Homelab Tools","description":"Sandboxed shell/python, LlamaParse document extraction, scrape.do search/fetch, publish files to s3.ereuna.org"}}]'
     volumes:
       - open-webui:/app/backend/data
@@ -118,6 +129,8 @@ services:
       # Shared ONLY with clickhouse-mcp (same idea as gws): nothing else can reach it.
       - chmcp
       - dgmcp
+      - ghmcp
+      - gtmcp
 
   # Google Workspace MCP (Drive/Docs/Sheets/Slides read-only + Calendar read/write, via the regular Google REST APIs).
   # Single-user: holds ONE Google account's refresh token (credentials volume). The /mcp
@@ -135,9 +148,16 @@ services:
     # 2026-11-22: Calendar is read/write (list_calendars, get_events, manage_event = create/update/delete),
     # everything else stays read-only. --permissions replaces --read-only/--tools (mutually exclusive) and
     # requests only the scopes each level needs: Drive/Docs/Sheets/Slides read-only, Calendar full.
+    # 2026-11-22: + Gmail READ and DRAFTS (no sending). "gmail:readonly+drafts" grants only the readonly and drafts scopes (gmail.readonly +
+    # gmail.compose; no labels/modify/settings). Google has no drafts-only scope and gmail.compose can technically send, so sending is also
+    # blocked in the server (--disabled-tools). draft_gmail_message lives in the "extended" tier, hence --tool-tier extended; that registers
+    # extra tools for the other services too, so Open WebUI exposes each connection through an allow-list (function_name_filter_list):
+    # `gworkspace` = the original 10 tools, `gmail` = the 7 Gmail read/draft tools (see README "Gmail").
     command: ["--transport", "streamable-http", "--single-user",
-              "--tool-tier", "core",
-              "--permissions", "drive:readonly", "docs:readonly", "sheets:readonly", "slides:readonly", "calendar:full"]
+              "--tool-tier", "extended",
+              "--permissions", "drive:readonly", "docs:readonly", "sheets:readonly", "slides:readonly", "calendar:full", "gmail:readonly+drafts",
+              "--disabled-tools", "send_gmail_message", "manage_gmail_filter", "manage_gmail_label", "modify_gmail_message_labels",
+              "batch_modify_gmail_message_labels"]
     environment:
       - GOOGLE_OAUTH_CLIENT_ID=${GOOGLE_OAUTH_CLIENT_ID:?set GOOGLE_OAUTH_CLIENT_ID in .env}
       - GOOGLE_OAUTH_CLIENT_SECRET=${GOOGLE_OAUTH_CLIENT_SECRET:?set GOOGLE_OAUTH_CLIENT_SECRET in .env}
@@ -255,6 +275,50 @@ services:
       driver: json-file
       options: { max-size: "10m", max-file: "3" }
 
+  # GitHub MCP (official github/github-mcp-server v2.2.0), HTTP mode, READ-ONLY. Stateless credential passthrough: this container holds NO
+  # token; Open WebUI sends the user's GitHub token as `Authorization: Bearer` (the connection key, see README "GitHub and Gitea MCP").
+  # The full tool list is ~18k tokens, so Open WebUI exposes a 13-tool allow-list (git-mcp/register_in_openwebui.py). Image pinned by digest.
+  github-mcp:
+    image: ghcr.io/github/github-mcp-server@sha256:040c4e99810076035eb1d9beb4b4a96fcf589c43cefed6ff51a46a553eb4e174   # v2.2.0, 2026-11-16
+    container_name: github-mcp
+    restart: always
+    user: "65532:65532"
+    command: ["http", "--port", "8082", "--read-only", "--toolsets", "context,repos,issues,pull_requests",
+              "--exclude-tools", "ui_get,list_issue_fields,list_issue_types"]
+    networks:
+      - ghmcp
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    read_only: true
+    tmpfs: ["/tmp:size=32m"]
+    mem_limit: 256m
+    pids_limit: 128
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  # Gitea MCP (official gitea.com/gitea/gitea-mcp), HTTP mode, READ-ONLY, pointed at the Gitea app on TrueNAS (Tailscale IP, port 30008,
+  # Gitea 1.25.5). Stateless credential passthrough: no token in this container; Open WebUI sends a Gitea access token (read-only scopes,
+  # name "open-webui-mcp", user aeacus) as `Authorization: Bearer`. Image pinned by digest.
+  gitea-mcp:
+    image: docker.gitea.com/gitea-mcp-server@sha256:2daf12dfa853bfc21f6f4754bca2612957c2acbc4288b03ddcce81e37f18ea18   # 2026-11-06
+    container_name: gitea-mcp
+    restart: always
+    command: ["/app/gitea-mcp", "-t", "http", "-p", "8080", "-H", "http://100.100.133.10:30008", "-r"]
+    environment:
+      - GITEA_READONLY=true
+    networks:
+      - gtmcp
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    read_only: true
+    tmpfs: ["/tmp:size=32m"]
+    mem_limit: 256m
+    pids_limit: 128
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
   # MCP tool server (our own code, ./mcp-tools). Reachable ONLY from containers on this
   # compose network — no `ports:` on purpose — and every request must carry a valid Open
   # WebUI session token. Commands run as per-user unprivileged UIDs inside this container.
@@ -289,6 +353,46 @@ services:
       driver: json-file
       options: { max-size: "20m", max-file: "3" }
 
+  # Switches dead tool servers off in Open WebUI and back on when they recover (see
+  # mcp-healthcheck/healthcheck.py). Probes go THROUGH Open WebUI's verify endpoint, so this
+  # container needs only the default network (not gws/chmcp/dgmcp/ghmcp/gtmcp). It holds
+  # WEBUI_SECRET_KEY to mint a 2-minute admin token, hence the lockdown. OWUI_ADMIN_ID is the
+  # admin user's id (not a secret): select id from user where role='admin' order by created_at limit 1
+  mcp-healthcheck:
+    image: python:3.12-slim-bookworm
+    container_name: mcp-healthcheck
+    restart: always
+    depends_on:
+      - open-webui
+    command: ["python", "-u", "/app/healthcheck.py"]
+    environment:
+      - OWUI_URL=http://open-webui:8080
+      - WEBUI_SECRET_KEY=${WEBUI_SECRET_KEY:?set WEBUI_SECRET_KEY in .env}
+      - OWUI_ADMIN_ID=${OWUI_ADMIN_ID:?set OWUI_ADMIN_ID in .env (admin user id from Open WebUI)}
+      - CHECK_INTERVAL=45
+      - FAILS_TO_DISABLE=2
+      - OKS_TO_ENABLE=2
+      - DRY_RUN=${MCP_HEALTHCHECK_DRY_RUN:-false}
+    volumes:
+      - ./mcp-healthcheck/healthcheck.py:/app/healthcheck.py:ro
+    healthcheck:
+      # Heartbeat is written after every completed cycle; stale = loop stuck or Open WebUI down.
+      test: ["CMD", "python", "-c", "import os,sys,time; sys.exit(0 if time.time()-os.path.getmtime('/tmp/heartbeat')<300 else 1)"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+    read_only: true
+    tmpfs: ["/tmp:size=1m"]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 128m
+    cpus: 0.25
+    pids_limit: 64
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
 volumes:
   ollama:
   open-webui:
@@ -300,3 +404,5 @@ networks:
   gws: {}
   chmcp: {}
   dgmcp: {}
+  ghmcp: {}
+  gtmcp: {}

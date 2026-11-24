@@ -31,6 +31,23 @@ EVENTS = [
 ]
 
 
+_orig_render = cp.Tools.render_calendar
+LAST_MSG = {}
+
+
+async def _render_html_only(self, *a, **k):
+    """render_calendar returns (HTMLResponse, message) or an error string; most checks below look at the HTMLResponse."""
+    r = await _orig_render(self, *a, **k)
+    if isinstance(r, tuple):
+        LAST_MSG["msg"] = r[1]
+        return r[0]
+    LAST_MSG["msg"] = r
+    return r
+
+
+cp.Tools.render_calendar = _render_html_only
+
+
 def render(view, focus="2026-11-25", events=EVENTS):
     tools = cp.Tools()
     return asyncio.run(tools.render_calendar(json.dumps(events), view, focus, "Plan for the week"))
@@ -58,7 +75,7 @@ for view in ("month", "week", "day", "agenda"):
     page = render(view)
     ok = isinstance(page, str) is False or True  # string result only when an emitter exists; see below
     html_ = asyncio.run(cp.Tools().render_calendar(json.dumps(EVENTS), view, "2026-11-25", "t"))
-    check(f"{view}: returns an inline HTMLResponse when there is no event emitter", hasattr(html_, "body") and b"<html" in html_.body)
+    check(f"{view}: returns an inline HTMLResponse", hasattr(html_, "body") and b"<html" in html_.body)
     if OUT:
         OUT.mkdir(parents=True, exist_ok=True)
         (OUT / f"cal_{view}.html").write_bytes(html_.body)
@@ -78,17 +95,12 @@ month = asyncio.run(cp.Tools().render_calendar(json.dumps(EVENTS), "month", "202
 check("month: all-day trip appears on 26th and 27th", month.count(">Conference trip</div>") == 2, month.count(">Conference trip</div>"))
 check("month: overnight workshop appears on 27th and 28th", month.count("Late workshop</div>") == 2, month.count("Late workshop</div>"))
 
-# emitter path: embeds event + short instruction to the model
-sent = []
-
-
-async def emitter(m):
-    sent.append(m)
-
-
-msg = asyncio.run(cp.Tools().render_calendar(json.dumps(EVENTS), "week", "2026-11-25", "t", __event_emitter__=emitter))
-check("emitter path sends an embeds event", any(m["type"] == "embeds" and "<html" in m["data"]["embeds"][0] for m in sent))
+# the real return shape: (HTMLResponse, text for the model)
+raw = asyncio.run(_orig_render(cp.Tools(), json.dumps(EVENTS), "week", "2026-11-25", "t"))
+check("returns a (HTMLResponse, message) tuple like the Reveal.js tool", isinstance(raw, tuple) and len(raw) == 2 and hasattr(raw[0], "body") and isinstance(raw[1], str))
+msg = raw[1]
 check("model is told about double-bookings and not to repeat events", "Double-bookings" in msg and "Do not list" in msg, msg)
+check("inline header is set so Open WebUI embeds it", raw[0].headers.get("content-disposition") == "inline")
 
 # ------------------------------------------------------------------ safety
 evil = [{"title": "<script>alert(1)</script><img src=x onerror=alert(2)>", "start": "2026-11-23T09:00", "end": "2026-11-23T10:00", "location": "\"><b>x", "calendar": "<i>cal</i>"}]

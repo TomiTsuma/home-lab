@@ -253,6 +253,137 @@ Community [`dagster-mcp`](https://github.com/fabdendev/dagster-mcp) (MIT, single
   webserver needs one, then `docker compose up -d dagster-mcp`. For several Dagster instances (one per Maia warehouse) set
   `DAGSTER_ENVS` (JSON name -> url/token); tools then take `env=<name>`.
 
+## Importing ChatGPT conversations (`chatgpt-import/`)
+
+`chatgpt-import/import_chatgpt.py` imports a ChatGPT data export (`conversations-NNN.json` + the `*.dat` attachments) through
+Open WebUI's `POST /api/v1/chats/import` (the Settings > Chats importer does not handle this export's shards, hidden reasoning or
+attachments). Imported on **2026-11-22**: 993 chats / 17,494 messages (Jan 2023 to Nov 2026), verified against the source.
+- **Run:** copy the export into the open-webui container (`/tmp/chatgpt`), copy the script, then
+  `docker exec open-webui python3 /tmp/import_chatgpt.py --src /tmp/chatgpt` (`--dry-run` first, `--limit N` / `--only <id,..>` for
+  trials). It mints a short-lived admin JWT inside the container, so nothing needs a password.
+- **Conversion:** keeps original dates, archived flag and model name (gpt-4o, gpt-5, ...); tags every chat `chatgpt-import`
+  (`meta.chatgpt_id` is the de-duplication key, so a re-run skips what is already there); drops hidden "thoughts" and
+  reasoning-recap entries and ChatGPT's citation markers (U+E200..U+E206 blocks, entity markers become the plain name).
+- **Nothing is dropped from the conversation itself:** 2.7% of the export's visible messages are not linked from `current_node`
+  (its `children` lists are incomplete). They are rebuilt from `parent` pointers: native Open WebUI branches (arrow switcher) when
+  they hang off the main thread, or a separate "<title> (recovered fragment N)" chat when they do not (4 such chats, 8 messages).
+- **Attachments:** images (174) are embedded inline as data URIs, because Open WebUI's frontend treats a relative image `url` as a
+  file *id* (a path like `/api/v1/files/<id>/content` renders as a broken image). Other files (24) are uploaded with
+  `?process=false` (no embedding) and show as file chips. 60 attachments are not in the export; those messages carry an italic
+  "[attachment not included in the ChatGPT export: name]" note.
+- **Limits:** the old ChatGPT model ids do not exist in Open WebUI, so these chats are for reading/searching; continuing one means
+  picking another model. Uploaded non-image files are not processed for RAG. The database grew from 14 MB to 228 MB (inline images
+  are stored in both the `chat` and `chat_message` tables); full-text search over about 1,000 chats takes 2-5 s.
+- **Undo:** `python3 import_chatgpt.py --src x --rollback` deletes every chat it created (`meta.source == chatgpt-export`) and every
+  file it uploaded. The pre-import database backup is `/app/backend/data/webui.db.bak-pre-chatgpt-import-20261122-030613` (in the
+  `open-webui` volume); delete it once you are happy.
+
+## Importing Claude conversations (`chatgpt-import/import_claude.py`)
+
+Imports a claude.ai data export (`conversations.json` + `design_chats/*.json`) the same way as the ChatGPT import (own code, same
+`/api/v1/chats/import` route, reuses `import_chatgpt.py`'s API client, so copy both files into the container). Imported on
+**2026-11-22**, two accounts: 224 chats / 3,601 messages (`ereuna.org`: 50 chats, Oct-Nov 2026; Gmail: 174 chats, May-Nov 2026),
+including 5 Claude Design chats and 3 recovered fragments.
+- **How to get the export:** claude.ai gives a manifest of per-category zip links (`manifest-*.json`). The links sit behind
+  Cloudflare's bot check, so they must be opened in a signed-in browser (they are valid 24 h and may be single-use); a script cannot
+  fetch them. Each account exports separately.
+- **Run:** `python3 import_claude.py --src <dir with conversations.json> --account ereuna|gmail [--dry-run|--limit N|--only <uuid,..>]`.
+  `--rollback` deletes everything it created (`meta.source == claude-export`) and the files it uploaded.
+- **Tags:** `claude-import` + `claude-<account>` (+ `claude-design`); `meta.claude_uuid` is the de-duplication key.
+- **Conversion:** the branch ending at the newest message is the chat; other branches are native Open WebUI branches (22 branch points);
+  unconnected pieces become "(recovered fragment N)" chats. Text blocks are the message text. Each tool call (about 11,400, mostly
+  agentic Bash/Read/Write/WebSearch) becomes one collapsed row (name + label, input and result truncated to 1.2k/1.5k chars). A message
+  whose tool output would exceed 40k chars is shrunk, and if still too big its calls are folded into one list (the largest message went
+  from 691,000 to 58,900 chars; 15 messages summarised, 76 shrunk). Hidden `thinking` (6,374), `injected_prompt_block` (440) and
+  `token_budget` blocks are dropped.
+- **Attachments:** the export has NO bytes for uploaded images/PDFs (only name and id), so 933 of them are listed in an italic note on
+  their message. The 85 pasted-text attachments carry full text and were uploaded as `.txt`/`.md` files (`process=false`, chips).
+- **Not imported (your call):** `projects` (19 projects, 39 documents plus instructions; the export does not link chats to projects),
+  `memories` (Claude memory files; the Gmail account also has a conversations memory and 5 project memories), `frames` (about 600 MB of
+  Claude artifact versions), `artifact_data`, `claude_code_cloud` (routines and runs), `feedback`. Projects could become Knowledge bases and
+  memories Notes if wanted.
+- **Verification:** counts equal the dry run exactly (chats, messages, `chat_message` rows, no duplicates, integrity ok); in the real UI the
+  tool rows start collapsed and expand to Input/Result, file chips and notes show, the branch switcher appears. Database 228 -> 289 MB.
+  Backup before this import: `/app/backend/data/webui.db.bak-pre-claude-import-20261122-044919` (delete when happy).
+
+## Claude memories, projects and chats -> Open WebUI (2026-11-22)
+
+Scripts in `chatgpt-import/` (own code, run inside the open-webui container next to `import_chatgpt.py`):
+- **Memories** (`import_claude_memories.py`): Open WebUI 0.13 memory is path-based (`type` user|context + `path`; the model can list/read paths
+  and search), which matches Claude's memory files. 77 imported as `claude/<account>/<original path>` (project ids replaced by project names;
+  Gmail also has `conversations-memory.md` and one `memory-summary.md` per project). Only each account's `profile.md` / `preferences.md` are type
+  `user` (recalled in every chat, capped by the admin setting `memories.user_char_limit`, default 2000 chars, so not all of it fits); everything else
+  is `context` (found by semantic search or read by path, capped by `context_char_limit`). Verified: semantic search returns the right files.
+  **Heads-up:** `claude/ereuna/preferences.md` contains Claude's standing "deeper, not bigger" prompt-rewrite routine, which is now injected into
+  every chat; demote it to `context` (or delete it) if you do not want that in Open WebUI. `--rollback` deletes all `claude/*` memories.
+- **Projects -> Folders** (`import_claude_projects.py`): Open WebUI calls them "Projects" in code and "Folders" in the UI. Parent folder per account
+  ("Claude · ereuna.org", "Claude · Gmail", which the owner later renamed "Claude · Personal"), one sub-folder per project: instructions
+  (`prompt_template` + description) -> folder system prompt (the ereuna.org Geothermal project's is 40,732 chars), documents -> files uploaded with
+  processing (embedded, searchable). 17 folders (the starter "How to use Claude" projects were skipped). Export has only extracted text for documents,
+  so non-text names get `.txt`. With native tool-calling a folder's files are read through the built-in *knowledge* tool, which `qwen3.5:9b` has
+  switched off (`builtinTools.knowledge=false`); enable it for that model if you want it to use folder documents.
+- **Chats -> their folders** (`assign_chats_to_folders.py`, map built from evidence in the export): conversations carry no project field, so membership
+  is inferred in priority order: (1) memory write into `/projects/<id>/`; (2) the injected memory snapshot lists that project's files (in a project
+  chat the current project's files are listed as full paths, in other chats other projects appear only as collapsed `projects/<id>/` entries);
+  (3) a project document is named in the chat (agrees with (2) 3/3 times they overlap); (4) project-knowledge-search used (4 Drug Discovery chats:
+  1 by text overlap with the project documents, 3 inferred by topic). Contradictory evidence leaves a chat unfiled. Result: 49 project
+  conversations filed (55 chats counting 1 recovered fragment and 5 design chats): Gmail account 39 (Drug Discovery 14, Geothermal ML 11, Cropnuts 6,
+  Personal Portfolio 6, Core&Outline 2) and ereuna.org 10 (Geothermal 4, Design and Brand 4, Briefings in Bioinformatics 1, Partnerships 1), plus the
+  5 Claude Design chats in a "Claude Design" folder per account. The other 170 of the 219 conversations show no evidence of being in a project (many
+  have no memory snapshot at all, so absence of evidence is not proof) and stay unfiled. Chats now inherit their folder's instructions when continued.
+  `--rollback` moves them back out of folders.
+
+## Gmail: read and draft, never send (`google-workspace-mcp/split_connections.py`)
+
+Added 2026-11-22 to the existing Google server (same container, same sign-in):
+- Permission `gmail:readonly+drafts` = scopes `gmail.readonly` + `gmail.compose` only (no labels/modify/settings). Google has no drafts-only
+  scope and `gmail.compose` can technically send, so `send_gmail_message` is also disabled in the server (`--disabled-tools`), together with label,
+  filter and modify tools. `draft_gmail_message` is in the "extended" tier, hence `--tool-tier extended`: the server now registers 30 tools.
+- Open WebUI exposes it through two connections on the same URL with allow-lists (`function_name_filter_list`): `gworkspace` = the original 10
+  (Calendar r/w, Drive/Docs/Sheets/Slides read-only), `gmail` = 7 tools (`search_gmail_messages`, `get_gmail_message_content`,
+  `get_gmail_messages_content_batch`, `get_gmail_thread_content`, `get_gmail_attachment_content`, `list_gmail_labels`, `draft_gmail_message`).
+- `gmail` is default-on only for the four Claude models; local models can enable it per chat from the "+" menu. Reason: email text is untrusted input
+  (prompt injection), and the risky combination is a model that reads a hostile email while holding write or fetch tools. Draft-only plus no
+  sending limits the damage, but `fetch_url`/`publish_file` (homelab tools) remain possible exfiltration paths, so use trusted models for mail.
+- One-time Google consent is required for the new scopes (the first Gmail call returns the sign-in link); the Gmail API must be enabled in the
+  Cloud project. Single-user server: it serves ONE Google account (tommytsuma7@gmail.com), not the ereuna.org mailbox.
+
+## Why qwen3.5:9b sometimes "thinks and stops" (2026-11-22 findings)
+
+- Real chat records show: Claude Haiku built a Reveal.js deck from calendar + Chlio data end to end; `qwen3.5:9b` summarised the calendar in text
+  but, on "generate slides using the reveal.js tools" (no subject), ended with an EMPTY message after `recall_memories` and a short reasoning block.
+- Causes seen: about 30k tokens of tool definitions on that model; the always-attached `visualize` skill makes it call `list_available_skills` /
+  `view_skill` on any "render/draw" request; with thinking on, the turn can end inside the reasoning block (empty answer, no tool call).
+- Reveal.js decks do render inline on 0.13.4 (native mode, `(HTMLResponse, text)` return). `calendar_planner` was switched to the same return shape
+  (it used an `embeds` event that was never verified in a real chat).
+- Variant model `qwen3.5:9b (agent)` created (thinking off via `think: false`, no skill, only calendar/Gmail/slides/Chlio tools). **Not yet validated:**
+  the end-to-end test was interrupted (network change, then memory pressure on the laptop). Your default `qwen3.5:9b` is unchanged.
+
+## GitHub and Gitea MCP (`git-mcp/`, compose services `github-mcp` and `gitea-mcp`)
+
+Installed 2026-11-22. Both are the official servers, run in HTTP mode, **read-only**, image pinned by digest, on private Docker networks
+(`ghmcp`, `gtmcp`) shared only with open-webui, no published ports, read-only rootfs, no capabilities. Neither container holds a credential:
+they are stateless and Open WebUI sends the user's token on every request (connection key), so the tokens live only in Open WebUI's config DB.
+- **Gitea** (`gitea.com/gitea/gitea-mcp` 1.13.0): connected to the Gitea app on TrueNAS, `http://100.100.133.10:30008` (Tailscale IP; Gitea 1.25.5).
+  28 read tools (~5.4k tokens): repos, files, branches, commits, issues, PRs, releases, wiki, packages, actions runs, search. Token: a dedicated
+  access token `open-webui-mcp` on user `aeacus` with read-only scopes (read:repository, issue, organization, user, misc, notification, package;
+  no write, no admin). Verified: real repos returned (`aeacus/lyre`, `deploy`, `ml-containers`, ...), and a write with the token is refused (HTTP 403).
+  Revoke: Gitea > Settings > Applications. The MCP also runs with `-r`/`GITEA_READONLY`, so a wider token would still not write until that is removed.
+  Note: Gitea's `ROOT_URL` lacks the port, so links in results read `http://100.100.133.10/...` instead of `...:30008/...`.
+- **GitHub** (`github/github-mcp-server` v2.2.0, `http` mode, `--read-only`, toolsets context,repos,issues,pull_requests): the full set is ~18k tokens,
+  so Open WebUI exposes a 13-tool allow-list (`get_me`, `search_repositories`, `get_file_contents`, `list_commits`, `get_commit`, `list_branches`,
+  `search_code`, `issue_read`, `list_issues`, `search_issues`, `pull_request_read`, `list_pull_requests`, `search_pull_requests`). **Connected 2026-11-22**
+  with the owner's fine-grained token (login TomiTsuma, expires 2027-02-20): verified `get_me` and a repository search (83 public repos) through Open WebUI's
+  network. That token is **public-repositories read-only**: it sees 0 private repos and no organization membership (its "all repositories" means public ones;
+  public org repos such as coreoutline and DataExpert-io-Community are visible). For private repos create a token with a resource owner and repository
+  selection (one token per owner: your account, each org) and add a connection per owner. Before it was connected the connection was disabled. Create a fine-grained PAT (GitHub > Settings > Developer settings > Fine-grained
+  tokens; the repos you want; permissions Contents, Issues, Pull requests, Metadata = Read only; expiry 90 days), then paste it in Open WebUI
+  Admin > Settings > External Tools > GitHub > Key and switch the connection on (or run `register_in_openwebui.py` with it on stdin).
+  Verified without a real token: the server reaches api.github.com and returns GitHub's "401 Bad credentials" for a dummy token.
+- **Exposure:** both are default-on for the four Claude models only. Repository files, issues and PR text are untrusted input (prompt injection), so the
+  local models can switch them on per chat from the "+" menu instead of having them by default.
+- **Write access later:** drop `-r` and `GITEA_READONLY` (Gitea) / `--read-only` (GitHub) in compose and use a token with write scopes.
+
 ## Community plugins (`plugins/`)
 
 Installed 2026-11-21. The plugins run arbitrary Python inside Open WebUI, so each file was read
@@ -474,3 +605,9 @@ between two locations.
 - Open WebUI's Anthropic connection config lives in its own SQLite
   `webui.db` (`config` table), not in this compose file or `.env` — it's set
   once through the admin UI and isn't captured as code here.
+
+## Which model for long-range work (benchmark, 2026-11-23)
+
+Short version: use **Claude Haiku 5.5 - Agent (long tasks)** (`claude-haiku-agent`) for research, coding with test loops and reporting; use `qwen3.5-9b-agent` for quick local lookups. Measured with `bench/` (8 graded tasks through the real API): the Haiku agent passed T1-T7; qwen3.5:9b passed only the single-tool lookups (3/8) and thrashes on code. Details, bug list and caveats: `docs/changelog/231126-004500_agent_model_benchmark_changelog.md`.
+
+Operational rules learned: keep the **skills builtin off** on agent models; attach only the tool servers a chat needs (eight at once stalls the first turn); do not pin the 9B in Ollama on the 12 GB VM (swap thrash); after an Ollama hang, `docker restart ollama` and warm the model with a long-timeout request (cold load from the shared HDD is slow). To rerun: `bench/make_variants.py` then `bench/run_bench.py --model <id> --label <name> [--packs]` inside the open-webui container; `bench/summarize.py` prints the table.

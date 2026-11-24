@@ -238,6 +238,6 @@
     "name": "Calendar Planner",
     "source": "own code (homelab/ai/open-webui/plugins/src/calendar_planner.py); no external dependencies",
     "description": "Draws month/week/day/agenda calendars inline, flags double-bookings, shows proposed plan items, finds free slots. Use with the Google Calendar tools.",
-    "sha256": "8db9362acfaa4034969115d140e9da6cb2e96178b8ead63be846ac284ec2a4b3"
+    "sha256": "e2c84d964eff04968d0287d764e957c9f265c47dc37c613299ba79b47ef632eb"
   }
 ]

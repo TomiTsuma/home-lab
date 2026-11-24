@@ -342,8 +342,7 @@ class Tools:
         view: str = "week",
         focus_date: str = "",
         title: str = "Calendar",
-        __event_emitter__=None,
-    ):
+    ) -> "tuple[HTMLResponse, str] | str":
         """
         Draws a calendar inline in the chat. Use it AFTER reading the user's events (e.g. with the Google get_events tool), or to
         preview a plan before creating it. Events that overlap are outlined in red; events with "proposed": true are drawn dashed.
@@ -398,11 +397,9 @@ class Tools:
             f"The {view} calendar ({len(evs)} events) is now displayed in the chat. Do not list the events again. "
             + (" ".join(notes) + " Mention these briefly." if notes else "No double-bookings.")
         )
-        if __event_emitter__:
-            await __event_emitter__({"type": "status", "data": {"description": "Calendar ready", "done": True}})
-            await __event_emitter__({"type": "embeds", "data": {"embeds": [page]}})
-            return msg
-        return HTMLResponse(content=page, headers={"Content-Disposition": "inline"})
+        # (HTMLResponse, text): Open WebUI draws the first as an inline embed and gives the second to the model as the tool result.
+        # This is the same return shape as the Reveal.js deck tool, which is confirmed to render inline on 0.13.4 in native tool-calling mode.
+        return HTMLResponse(content=page, headers={"Content-Disposition": "inline"}), msg
 
     async def find_free_slots(
         self,
